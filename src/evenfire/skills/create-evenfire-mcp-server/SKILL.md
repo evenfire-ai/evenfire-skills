@@ -13,10 +13,9 @@ description: >-
 
 # Building an Evenfire MCP server
 
-> **Verified against Evenfire `dev` at commit `21d9a7d5d` (2026-08-11).**
-> `git describe`: `v0.3.0-915-g21d9a7d5d`. CRD API `clerum.io/v1alpha1`,
-> `clerum-crds` chart `0.7.0`. Field names, enums, endpoints, and commands below
-> match that revision. See [VERSIONS.md](../VERSIONS.md).
+> **Verified against Evenfire `dev` at commit `f9e8d0487`.**
+> CRD API `clerum.io/v1alpha1`, `clerum-crds` chart `0.8.0`. Field names, enums,
+> endpoints, and commands below match that revision.
 
 An MCP server exposes tools (and optionally resources/prompts) over the Model
 Context Protocol. On Evenfire it reaches the chat agent through `mcp-host`, which
@@ -160,8 +159,8 @@ To ship an existing upstream MCP server, wrap it rather than rewrite it.
 
 Node stdio server: a thin image that installs the upstream package with NO `CMD`,
 plus a `stdio` `registry.json` whose `command[]` points at the installed
-entrypoint under `/mcp-bin` (the stdio-bridge sidecar copies `/app` into
-`/mcp-bin` and spawns it):
+entrypoint under `/mcp-bin` (an init container copies `/app` and `/mcp-app` into
+the shared `/mcp-bin` volume; the stdio-bridge sidecar then spawns it):
 
 ```dockerfile
 FROM node:22-alpine
@@ -193,7 +192,8 @@ StreamableHTTP, and use `transport: streamableHttp` with no `command`.
 
 The directory name, `registry.json` `.name`, the pushed image repo segment, and
 the scoped catalog name MUST all be the same string. This is a hard identity
-constraint: control-api rejects a mismatch with a 422 at BOTH publish and install
+constraint: for a scoped `@org/name` server whose image is on the Evenfire
+registry, control-api rejects a mismatch with a 422 at BOTH publish and install
 (`imageRef repo ... must equal the entry name ... cross-org pull would be denied`),
 and the collection's `publish.sh` fails even earlier, locally, on a `dir != name`
 mismatch. The name must be a DNS-1123 label (`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`).
@@ -260,12 +260,14 @@ Field rules verified against the publisher and control-api:
   (HTTPS only, at least one), transport must NOT be `stdio`, optional
   `authHeaders: [{header, valueTemplate}]` (the `${VAR}` placeholder must match a
   `credentialSchema.keys[].name`). Remote may carry `authHeaders`; local may not.
-- `egressSummary` has exactly two shapes. Exact-host:
+- `egressSummary` has two shapes. Exact-host:
   `{ "domains": [hosts], "ports": [ints] }` (bare hostnames, no scheme/path/
-  wildcard/IP). Public-web: exactly `{ "wideCidr": true, "ports": [80, 443] }`
-  (partial or with domains is rejected). Omit it entirely when the server has no
-  external egress. Use public-web ONLY for genuinely dynamic public destinations
-  (a CDN or a runtime-resolved host), not to dodge a finite host list.
+  wildcard/IP). Public-web: `{ "wideCidr": true }` (ports default to 80/443 and
+  may only be 80 or 443). Public-web is validated but collapses to a single
+  `public-web` egress class — any `domains` you add are validated then ignored, so
+  do not rely on them to scope it. Omit `egressSummary` entirely when the server
+  has no external egress. Use public-web ONLY for genuinely dynamic public
+  destinations (a CDN or a runtime-resolved host), not to dodge a finite host list.
 - `credentialSchema` is `{ required, authType, keys: [{name, label?, kind?,
   semanticType?, description?}] }` or `null`/omitted for a keyless server. Only
   `keys[].name` is load-bearing (it must equal the env var the code reads or the

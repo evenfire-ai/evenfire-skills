@@ -11,10 +11,9 @@ description: >-
 
 # Building an Evenfire plugin (WorkflowRecipe)
 
-> **Verified against Evenfire `dev` at commit `21d9a7d5d` (2026-08-11).**
-> `git describe`: `v0.3.0-915-g21d9a7d5d`. CRD API `clerum.io/v1alpha1`,
-> `clerum-crds` chart `0.7.0`. Field names, enums, endpoints, and commands below
-> match that revision. See [VERSIONS.md](../VERSIONS.md).
+> **Verified against Evenfire `dev` at commit `f9e8d0487`.**
+> CRD API `clerum.io/v1alpha1`, `clerum-crds` chart `0.8.0`. Field names, enums,
+> endpoints, and commands below match that revision.
 
 A plugin is one Kubernetes custom resource, `apiVersion: clerum.io/v1alpha1`,
 `kind: WorkflowRecipe`. The platform reconciles it into Deployments,
@@ -295,63 +294,15 @@ spec:
     - { from: mcp, to: api, port: 8080 }     # mcp (mcp-server ns) -> api (sandbox-recipes)
 ```
 
-### 4.1 Field and enum reference (copy values verbatim)
+### 4.1 Field and enum reference
 
-- `workloads[].type`: `deployment | statefulset | cronjob | job | daemonset`.
-  A `cronjob` workload MUST set the workload-level `schedule`. Max 25 workloads.
-- `workloads[].type` required trio: `id`, `type`, `image`. Common optionals:
-  `port`, `replicas` (0-20), `command`, `args`, `env`, `envSecret`,
-  `volumeMounts`, `volumeClaimTemplates`, `resources`, `healthCheck`,
-  `dependsOn`, `imagePullSecrets`, `oauthClientRefs`, `egressBindings`,
-  `includeWhen`, `transport`, `security`, `schedule`.
-- `env[]` items are `{name, value}` strings only. There is **no** `valueFrom`,
-  `envFrom`, or `envFromConfigMap`. The only Secret-to-env path is `envSecret`
-  (`name` + `keys[{secretKey, envVar, optional?}]`).
-- `healthCheck`: `{type: http|tcp|exec, path, port, command[], initialDelaySeconds,
-  periodSeconds, timeoutSeconds, failureThreshold}`. There is **no** `startupProbe`
-  and **no** `successThreshold`; the one `healthCheck` block serves both liveness
-  and readiness. For slow starts, widen `initialDelaySeconds`/`failureThreshold`,
-  or return 503 from the health path until ready.
-- `security` overrides: `runAsUser`/`runAsGroup`/`fsGroup` (each min 1, so root
-  uid 0 is rejected), `addCapabilities` (only `CHOWN|FOWNER|DAC_OVERRIDE|NET_BIND_SERVICE`,
-  enforced twice), `prepareVolumeOwnership`. Setting `runAsUser` forces
-  `runAsNonRoot: true`.
-- `transport.type`: `streamableHttp | sse | stdio` (author `streamableHttp` for
-  own-code HTTP servers). `path` defaults matter, set `/mcp`.
-- `egressBindings[]`: `{egressClass: exact-host|public-web, dns, port, protocol}`.
-  `exact-host` (default) opens one DNS host + port. `public-web` opens public TCP
-  80/443 only and must NOT carry `dns`/`port`. Max 20.
-- `volumeClaimTemplates[]`: `{name, storageClass, accessMode, size}`,
-  `accessMode` is `ReadWriteOnce|ReadOnlyMany|ReadWriteMany`. Use `standard` for
-  minikube, the cluster's real class for GKE (`standard-rwo`) or DO
-  (`do-block-storage`). Max 4.
-- `security.isolationLevel`: `minimal | standard | strict`, additive, default
-  `minimal` (root allowed, writable root FS, all caps dropped, seccomp
-  RuntimeDefault). `standard` adds `runAsNonRoot` + read-only root FS. `strict`
-  adds pod identity pinned to 65534 + `automountServiceAccountToken: false` +
-  the PodSecurity `restricted` label. Prefer `minimal` and use a per-workload
-  `security.runAsUser` when a specific non-root uid is needed.
-- `spec.ui`: `workloadRef` + `port` required; optional `title` (<=100 chars),
-  `icon` (`data:` URI only, <=32 KB), `defaultPath` (starts with a single `/`),
-  `egress.internal[{workloadRef, port}]`, `egress.external[{fqdn, port}]` (DNS
-  only, no CIDR, no wildcard).
-- `spec.bindings[]`: `{from, to, port, protocol}` (from/to/port required). Emits
-  a symmetric NetworkPolicy (egress in the source namespace, ingress in the
-  target namespace), so cross-namespace bindings work.
-- `spec.contextRef`: OPTIONAL, even for a `transport` workload (the CRD calls it
-  "required when a workload exposes an MCP transport", but that is only a
-  description, not a validation rule). Omit it and WRC derives a private
-  `wf-<recipeName>` Context for the recipe's own MCP servers: they are isolated to
-  this recipe and the chat agent cannot see them until an operator adds them to
-  the chat Host's Context (see the `create-evenfire-mcp-server` skill's attach
-  procedure). Set it to a shared Context (for example `context1`) only to register
-  the MCP server there directly, and only on a NON-agentic recipe: on an agentic
-  recipe (any `steps`) setting `contextRef` is REJECTED unless BOTH
-  `spec.security.allowContextRef: true` AND a namespace `WorkflowRecipePolicy`
-  with `allowContextRef: true` exist. The only hard per-transport-workload
-  requirement is `port` (and `stdio` transport is valid only on `deployment`
-  workloads). This is why the common MCP-plus-notifications plugin (a transport
-  workload plus a keepalive step) simply omits `contextRef`.
+The exhaustive per-field and per-enum reference — every `workloads[]`,
+`healthCheck`, `security`, `transport`, `egressBindings`, `volumeClaimTemplates`,
+`spec.ui`, `spec.bindings`, and `spec.contextRef` value — lives in
+[references/recipe-fields.md](references/recipe-fields.md). Copy values verbatim
+from there; when a value is not listed, read the CRD at
+`charts/clerum-crds/crds/workflowrecipe.yaml` and the WRC reconciler rather than
+guessing.
 
 ### 4.2 Secrets, documented and labeled
 
@@ -391,19 +342,32 @@ that exists. When the MCP workload shares a Secret, create and label it in BOTH
   (`meta-hub-challenge | slack-url-verification | stripe-verify`). Public URL:
   `<host>/api/v1/webhook/<ns>/<name>/<id>`. `optional: true` keeps a webhook
   dormant (`410`) until its Secret appears.
-- Desktop notifications (`spec.pluginWorkloadSdk.clientNotifications`):
-  `allowedEventTypes` (required, no wildcards), `allowedUserRefs` (a BOOLEAN here,
-  may the recipe target users at all), plus `allowedCallers` naming the workload
-  ids allowed to send. Two extra facts that catch everyone:
-  (1) provisioning the always-on Plugin Workload SDK mcp-host requires the recipe
-  to enter the workflow path, so a pure-UI plugin adds a dormant keepalive
-  snippet step (`triggers.onDemand: {}` + one `run.type: snippet` returning
-  `{ ok: true }`) purely to trigger it;
-  (2) delivery ALSO needs a control-api `clientNotifications` grant, created by an
-  operator, listing the recipe, the allowed callers, the event types, and the
-  concrete recipient user UUIDs (no wildcard user). Without the grant every send
-  is `403 capability_not_declared` and nothing is delivered, silently. The grant
-  is not part of the recipe YAML; document it in `spec.description`.
+- Plugin Workload SDK (`spec.pluginWorkloadSdk`): opt the recipe into controlled
+  side-effect channels. At least ONE capability family must be declared (CEL
+  `PS1`). Declaring the block provisions an always-on SDK mcp-host (`:8099/sdk`)
+  eagerly — no run and no keepalive step are needed. Shared fields: `allowedCallers`
+  (workload ids allowed to call; each must reference a real `workloads[].id`, else
+  `PS4`; empty = all declared workloads) and `idempotencyKeyPattern` (regex,
+  default `^[a-zA-Z0-9_-]{1,128}$`). Every call is authorized against a matching
+  control-api grant regardless of the CRD block — without the grant every call is
+  `403 capability_not_declared` and nothing happens, silently. The grant is NOT
+  part of the recipe YAML; an operator creates it (`POST /admin/plugin-workload-sdk/grants`),
+  so document the requirement in `spec.description`.
+  - `clientNotifications` (desktop notifications): `allowedEventTypes` (required,
+    1-64, no wildcards `PS2`), `allowedTargetRefs` (opaque refs, ≤64),
+    `allowedUserRefs` (a BOOLEAN — whether the recipe may target named users at
+    all; the concrete user UUIDs live only in the operator grant, never in the
+    recipe YAML), plus ceilings `maxNotificationsPerRun` / `maxNotificationsPerMinute`
+    / `maxTitleBytes` / `maxBodyBytes`. Targets are opaque refs, never raw
+    email/phone.
+  - `promptBridge` (one-shot LLM call from a caller workload or snippet):
+    `allowedModels` (≤32, no wildcards `PS3`) plus ceilings `maxOutputTokens` /
+    `maxRequestsPerRun` / `maxConcurrentInvocations` / `maxInvocationsPerMinute`.
+    The provider is NOT author-selectable — it is the one bound to the recipe's
+    mcp-host; a request may pick a model within `allowedModels` only. It is
+    inference-only: no tools, no multi-turn, no attachments. Needs a resolvable
+    agent on the recipe (`spec.agent` or a step agent); a clientNotifications-only
+    recipe does not.
 
 ### 4.4 Steps, triggers, snippets, and outputs (workflow archetype)
 
@@ -473,7 +437,7 @@ Producing files:
 - `spec.output`: `{ destination: configmap|secret|stdout|pvc, format:
   pdf|xlsx|json|text|html|multi, claimName (pvc only), storageSize }`. Files are
   ephemeral unless `destination: pvc`. Download a run's artifact via control-api
-  `GET /api/v1/admin/recipes/:name/artifacts/:file/download`.
+  `GET /api/v1/admin/recipes/:name/artifacts/:artifactName/download`.
 
 ### 4.5 Shared resources (`spec.resources[]`)
 

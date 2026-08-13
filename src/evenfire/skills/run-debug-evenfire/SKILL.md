@@ -12,10 +12,9 @@ description: >-
 
 # Running and debugging Evenfire
 
-> **Verified against Evenfire `dev` at commit `21d9a7d5d` (2026-08-11).**
-> `git describe`: `v0.3.0-915-g21d9a7d5d`. CRD API `clerum.io/v1alpha1`,
-> `clerum-crds` chart `0.7.0`. Status enums, endpoints, and `make` targets below
-> match that revision. See [VERSIONS.md](../VERSIONS.md).
+> **Verified against Evenfire `dev` at commit `f9e8d0487`.**
+> CRD API `clerum.io/v1alpha1`, `clerum-crds` chart `0.8.0`. Status enums,
+> endpoints, and `make` targets below match that revision.
 
 This skill assumes you have the platform monorepo checked out (the `Makefile`,
 `scripts/minikube/`, and `deploy/` live there); the minikube and gcp make targets
@@ -47,10 +46,10 @@ kubectl --context=<target> get nodes -o name | head -1
 ## 2. Local full stack (minikube)
 
 ```bash
-make minikube-setup                 # cluster -> CRDs -> keys -> secrets -> BUILD :test images -> deploy -> verify
+make minikube-setup                 # cluster -> CRDs -> keys -> secrets -> BUILD :test images -> deploy -> verify (REBUILDS the DB)
 make minikube-setup ARGS="--skip-build"     # redeploy, reuse the already-loaded images
 make minikube-setup ARGS="--skip-uis"       # build backend services only (skip Control/Profile UI + Desktop)
-make minikube-setup ARGS="--reset-db"       # also wipe the postgres PVC (fixes first-run 409s / WAL corruption)
+REUSE_DB=true make minikube-setup           # preserve the postgres PVC (setup rebuilds it by default; ARGS="--keep-db" is equivalent)
 make minikube-status                # OK when readyReplicas==replicas, else "!! <ready>/<desired>"
 ```
 
@@ -63,9 +62,12 @@ Facts that trip people:
   UI and Desktop builds AND drops the Control/Profile UI cluster deployments
   (it renders the `minikube-no-uis` overlay), so the Control UI is not reachable
   after it. A local code change is picked up by a plain `make minikube-setup`.
-- A fresh setup PRESERVES the postgres volume by default. `--reset-db` deletes
-  the PVC and redeploys, and `make minikube-db-reset` does the same standalone.
-  Neither has a confirmation gate, so a reset wipes admin/setup data immediately.
+- `make minikube-setup` REBUILDS the postgres volume by default: it deletes the
+  `control-postgres-data` PVC and redeploys, wiping admin/setup data every run
+  (the migration gate rejects a stale volume). Preserve an existing volume with
+  `REUSE_DB=true` (or `ARGS="--keep-db"`). `--reset-db` only forces the default;
+  `make minikube-db-reset` resets standalone. No confirmation gate — a reset is
+  immediate.
 
 Port-forwards (keep running in a terminal):
 
@@ -137,9 +139,11 @@ established connection to `:8091`, not by the task exit code.
 The in-cluster recipe name is `recipe-<entry-slug>-v<version>-<hash>` for a
 registry install (version dots become hyphens, for example
 `recipe-evenfire-worktracker-v1-1-0-66ce9c41`) or the bare `metadata.name` for a
-hand-apply. Workload Deployments are recipe-scoped and usually hashed
-(`<recipeName>-<workloadId>-<8hex>`), though MCP and PVC-mounting workloads keep
-the bare workload id, so never guess a name, resolve by label:
+hand-apply. Workload naming depends on whether the recipe has `spec.steps`: a
+non-workflow recipe (no steps — the typical installed plugin) keeps the bare
+`<workloadId>` for non-MCP workloads and names MCP workloads
+`<recipeName>-<workloadId>`; a workflow recipe (has steps) hashes every workload
+`<recipeName>-<workloadId>-<8hex>`. So never guess a name, resolve by label:
 
 ```bash
 K="kubectl --context=<ctx>"
@@ -219,7 +223,7 @@ Pod failure to cause:
   token, mcp-host unreachable). Read `kubectl logs -n control-plane
   deploy/workflow-recipes` and the coordinator pod.
 - Artifacts from a run: download via control-api
-  `GET /api/v1/admin/recipes/:name/artifacts/:file/download`.
+  `GET /api/v1/admin/recipes/:name/artifacts/:artifactName/download`.
 - Controller logs (all in `control-plane`): `make minikube-logs SVC=workflow-recipes NS=control-plane`
   (WRC reconciler + coordinator), `SVC=host-context-controller` (MCP servers,
   NetworkPolicies, desktop pods), `SVC=control-api` (admin API, registry, auth).
@@ -240,7 +244,7 @@ scripts/evenfire-doctor.sh gke_eventfire-491421_us-central1-a_clerum-dev my-plug
 
 | Symptom | Fix |
 |---|---|
-| 409 on first-time admin setup | `make minikube-setup ARGS="--reset-db"` (or `make minikube-db-reset`) then re-run setup |
+| 409 on first-time admin setup | re-run `make minikube-setup` (rebuilds the DB by default), or `make minikube-db-reset` |
 | Pod `ImagePullBackOff` in minikube | `make minikube-setup` (rebuilds the `:test` images and loads them; do not pass `--skip-build`) |
 | `401 Invalid token` from chatllm | `make minikube-gen-keys` then `make minikube-sync-auth-key` |
 | Port-forward dropped | re-run `make minikube-pf-all`; on GKE check gcloud auth (`gcloud auth login`) |
