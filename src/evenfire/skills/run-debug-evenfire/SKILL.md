@@ -139,18 +139,19 @@ established connection to `:8091`, not by the task exit code.
 The in-cluster recipe name is `recipe-<entry-slug>-v<version>-<hash>` for a
 registry install (version dots become hyphens, for example
 `recipe-evenfire-worktracker-v1-1-0-66ce9c41`) or the bare `metadata.name` for a
-hand-apply. Workload naming depends on whether the recipe has `spec.steps`: a
-non-workflow recipe (no steps — the typical installed plugin) keeps the bare
-`<workloadId>` for non-MCP workloads and names MCP workloads
-`<recipeName>-<workloadId>`; a workflow recipe (has steps) hashes every workload
-`<recipeName>-<workloadId>-<8hex>`. So never guess a name, resolve by label:
+hand-apply. Each workload's real resource name is recorded in
+`.status.workloadInstances` (a map `workloadId -> name`, assigned on first deploy);
+deployed workloads are named `<recipeName>-<workloadId>-<8hex>`. Read that map or
+resolve by the `clerum.io/recipe=<recipeName>` label — never guess a name:
 
 ```bash
-K="kubectl --context=<ctx>"
+kc() { kubectl --context=<ctx> "$@"; }   # a function, so it word-splits in bash and zsh
 # Recipe objects are not labeled with the base name; match the generated name
 # (recipe-<entry-slug>-v<ver>-<hash> for a registry install, metadata.name for a hand-apply).
-NAME=$($K get workflowrecipes -n sandbox-recipes -o name | sed 's|.*/||' | grep -E '(^|-)<name>(-|$)' | head -1)
-$K get workflowrecipe "$NAME" -n sandbox-recipes -o jsonpath='{.status.phase}'; echo
+NAME=$(kc get workflowrecipes -n sandbox-recipes -o name | sed 's|.*/||' | grep -E '(^|-)<name>(-|$)' | head -1)
+kc get workflowrecipe "$NAME" -n sandbox-recipes -o jsonpath='{.status.phase}'; echo
+# the real per-workload names:
+kc get workflowrecipe "$NAME" -n sandbox-recipes -o jsonpath='{.status.workloadInstances}'; echo
 ```
 
 ### 5.2 Read status correctly
@@ -177,8 +178,8 @@ $K get workflowrecipe "$NAME" -n sandbox-recipes -o jsonpath='{.status.phase}'; 
   `pending, initializing, running, recovering, completed, failed, cancelled`.
 
 ```bash
-$K describe workflowrecipe "$NAME" -n sandbox-recipes
-$K get workflowrecipe "$NAME" -n sandbox-recipes \
+kc describe workflowrecipe "$NAME" -n sandbox-recipes
+kc get workflowrecipe "$NAME" -n sandbox-recipes \
   -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.message}{"\n"}{end}'
 ```
 
@@ -189,10 +190,10 @@ because a backend in another namespace is crash-looping.
 
 ```bash
 for ns in sandbox-recipes sandbox-ui mcp-server; do
-  echo "== $ns =="; $K get pods -n "$ns" -l clerum.io/recipe="$NAME"
+  echo "== $ns =="; kc get pods -n "$ns" -l clerum.io/recipe="$NAME"
 done
-$K describe pod <pod> -n <ns>     # events: image pull, secret, scheduling
-$K logs <pod> -n <ns>             # app crash reasons
+kc describe pod <pod> -n <ns>     # events: image pull, secret, scheduling
+kc logs <pod> -n <ns>             # app crash reasons
 ```
 
 Pod failure to cause:

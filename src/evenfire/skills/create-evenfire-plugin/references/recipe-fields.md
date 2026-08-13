@@ -6,7 +6,7 @@ guessing.
 
 - `workloads[].type`: `deployment | statefulset | cronjob | job | daemonset`.
   A `cronjob` workload MUST set the workload-level `schedule`. Max 25 workloads.
-- `workloads[].type` required trio: `id`, `type`, `image`. Common optionals:
+- `workloads[]` required trio: `id`, `type`, `image`. Common optionals:
   `port`, `replicas` (0-20), `command`, `args`, `env`, `envSecret`,
   `volumeMounts`, `volumeClaimTemplates`, `resources`, `healthCheck`,
   `dependsOn`, `imagePullSecrets`, `oauthClientRefs`, `egressBindings`,

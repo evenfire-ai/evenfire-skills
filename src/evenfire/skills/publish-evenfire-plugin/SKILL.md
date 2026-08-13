@@ -121,6 +121,9 @@ recipe document as a YAML/JSON string, <= 100 KB) for a recipe entry, or an
   org's own clusters/members and hides it from the default catalog. To read it
   back over the API you must pass `?visibility=all`.
 - `origin`: `human-authored | agent-generated | community`.
+- `category`: a value from the registry's category catalog (the Control UI lists
+  them via `GET /api/v1/admin/registry/categories`), for example `productivity`,
+  `data`, or `utility` — not free-form.
 - `contentCreatorTag` / `configCreatorTag`: `community` (or `1st-party` for a
   curator-published first-party entry).
 

@@ -121,6 +121,11 @@ Notes verified against the platform:
   the `credentialSchema.keys[].name` in `registry.json` exactly, or an
   operator-entered secret never reaches the running server.
 
+The `package.json` and `tsconfig.json` that support this `src/index.ts` (and the
+Dockerfile's `npm run build` + `dist/`), plus the required-vs-optional
+`registry.json` fields, are in
+[references/own-code-scaffold.md](references/own-code-scaffold.md).
+
 ## 3. Dockerfile (own-code, hardened)
 
 ```dockerfile

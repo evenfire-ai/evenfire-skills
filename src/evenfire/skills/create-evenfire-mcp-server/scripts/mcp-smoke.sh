@@ -13,7 +13,8 @@ set -euo pipefail
 
 URL="${1:-}"
 TOOL="${2:-}"
-ARGS="${3:-{}}"
+ARGS="${3:-}"
+[ -z "$ARGS" ] && ARGS='{}'
 PROTO="${MCP_PROTOCOL_VERSION:-2025-03-26}"
 
 if [ -z "$URL" ]; then
