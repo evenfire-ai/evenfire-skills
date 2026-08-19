@@ -1,12 +1,14 @@
 # Evenfire skills (Claude Code)
 
-This overlay bundles four Agent Skills for building on the Evenfire/Clerum platform.
+This overlay bundles five Agent Skills for building on the Evenfire/Clerum platform.
 Each lives under `.claude/skills/` and Claude loads one when its description matches
 the task:
 
 - `create-evenfire-plugin` — design and wire a WorkflowRecipe plugin (UI, backend, MCP,
   webhooks, OAuth, snippets).
 - `create-evenfire-mcp-server` — build or wrap an MCP server/connector.
+- `create-evenfire-hook` — author, harden, publish, and install an LlmHook guardrail
+  (token optimizer, moderator, output rewriter, usage recorder).
 - `publish-evenfire-plugin` — publish a recipe or connector to the org registry, version
   it, and install it.
 - `run-debug-evenfire` — bring up the stack (minikube or dev cluster) and debug a recipe,

@@ -32,6 +32,7 @@ PLUGIN_REPOSITORY = "https://github.com/evenfire-ai/evenfire-skills"
 PLUGIN_KEYWORDS = ["agent-skills", "evenfire", "clerum", "plugin", "mcp", "workflowrecipe"]
 
 EXPECTED_SKILLS = (
+    "create-evenfire-hook",
     "create-evenfire-mcp-server",
     "create-evenfire-plugin",
     "publish-evenfire-plugin",

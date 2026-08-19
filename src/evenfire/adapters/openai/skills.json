@@ -1,4 +1,9 @@
 {
+  "create-evenfire-hook": {
+    "display_name": "Create Evenfire Hook",
+    "short_description": "Author, test, and publish an LlmHook guardrail for Evenfire",
+    "default_prompt": "Use $create-evenfire-hook to author, harden, publish, and install this Evenfire hook."
+  },
   "create-evenfire-mcp-server": {
     "display_name": "Create Evenfire MCP Server",
     "short_description": "Build or wrap an MCP server/connector for Evenfire",
