@@ -17,9 +17,13 @@ description: >-
 
 > **Verified against the mcp-host guardrails build** (the `LlmHook` CRD
 > `clerum.io/v1alpha1`, HCC `llmHookReconciler`, control-api install-hook saga,
-> and the `/v1` contract generated from the running `mcp-host` image). Where this
-> document and the running build disagree, the build wins — regenerate the
-> contract cheatsheet against the pod rather than trusting prose.
+> and the `/v1` contract generated from the running `mcp-host` image), and
+> **validated live**: four hooks — one on each LLM-lane point (`preCall`,
+> `moderate`, `postCallSuccess`, `onError`) — were built, hardened, installed, and
+> A/B'd against a real agent on a running cluster, and every practice below is what
+> survived that. Where this document and the running build disagree, the build
+> wins — regenerate the contract cheatsheet against the pod rather than trusting
+> prose.
 
 A hook is your own process running **between the caller and the provider**, on
 every call through a Host — including calls that reach a tool you did not write
@@ -61,7 +65,15 @@ Three archetypes to copy:
   lane is enabled), reads bodies, **no egress, no capabilities**. It cannot alter
   anything and installs on a Host never configured for guardrails.
 - **Policy / redactor** — `moderate` to deny, or `postCallSuccess`/`postToolUse`
-  to redact. Deny-authoritative ⇒ must fail closed (§7).
+  to redact. Deny-authoritative ⇒ must fail closed (§7). `moderate` is the right
+  shape for rejecting prompt-injection or a policy violation, because a `preCall`
+  rewrite **cannot** touch `tool_result` content (only `type:'text'` blocks are
+  yours, §3) — exactly where injected instructions usually arrive; a `moderate`
+  hook *reads* everything and denies. But a deny blocks the whole call, so its
+  false positives are expensive: match only high-signal, unambiguous phrasing. (A
+  rule meant for "reveal your secrets" also fired on the benign "list the
+  environment variables this image expects" until it was tightened to require the
+  possessive "your" — tune until only the malicious form matches.)
 
 ## 2. Your trust posture is a consequence, not a wish
 
@@ -335,13 +347,44 @@ Then prove it was consulted:
   where the no-op log line from §4 earns its place: a quiet pod means either
   "never dialed" or "dialed and declined", and only a both-paths log line tells
   them apart.
-- **A/B the one number your hook moves** — `input_tokens` for a rewriter, a deny
+- **A/B the one thing your hook moves** — `input_tokens` for a rewriter, a deny
   for a policy hook, a changed response for a substituter — with the hook in the
-  lifecycle list and with it removed. Use a **fresh session** both times;
-  conversation history silently inflates the input and voids the comparison.
+  lifecycle list and with it removed. Use a **distinct sender each run**:
+  conversation history silently inflates the input, and a `moderate` hook re-scans
+  the *entire* projected conversation, so a message it denied once keeps every
+  later turn in that same session denied too (a reused session makes the second
+  half of an A/B meaningless).
 - Check `status.conditions` on the CR (the reconciler writes conditions, not flat
   phase fields). Note `status.observedDigest` is populated **only for image
   targets** — a `service`-target hook is never digest-verified by the platform.
+
+The direct way to A/B, with no channel or desktop app, is to drive the Host's
+own runtime endpoint from inside its pod (loopback bypasses the NetworkPolicy; the
+runtime edge guard is **header-based, not a JWT**):
+
+```bash
+POD=$(kubectl -n mcp-host get pod -l clerum.io/host-name=<host> -o name | head -1)
+kubectl -n mcp-host exec -i "$POD" -- node -e '
+  const s = "abtest-" + Date.now();                    // distinct sender => fresh session
+  fetch("http://localhost:8080/v1/runtime/messages", {
+    method: "POST",
+    headers: {                                          // NO authorization header
+      "content-type": "application/json",
+      "x-clerum-edge-caller": "channel-reader",
+      "x-clerum-edge-host-ref": "<host>",
+      "x-clerum-edge-channel-type": "telegram",
+      "x-clerum-edge-channel-id": "c-" + s,
+      "x-clerum-edge-sender": s },                      // headers must match the body
+    body: JSON.stringify({ content: "your test prompt", channelType: "telegram",
+      channelId: "c-" + s, sender: s, timestamp: new Date().toISOString(),
+      messageId: "m-" + s, hostRef: "<host>" }),
+  }).then(async r => console.log(r.status, await r.text()));
+'
+```
+
+The response is synchronous. Then read the **hook pod's** own log for the event
+it emitted (`deny`, `redacted`, `recovered`, …) — that, not the agent's reply, is
+the proof the hook fired rather than the model behaving similarly on its own.
 
 ## 9. What a hook can — and cannot — know about the caller
 
@@ -381,6 +424,10 @@ put an id on the wire.
   `capabilityCeiling`; the operator must widen it.
 - `pre_call` falls to fail-mode on error → returned `{}`; return
   `{action:'continue'}` to mean "no change".
+- A `preCall` params hook (e.g. a `max_tokens` cap) "never does anything" → the
+  agent often sends **no** generation params on the pre_call body (they arrive
+  `undefined`), so there is nothing above the ceiling to trim; it engages only when
+  a client sets one. Compare against the value you actually received, and log it.
 - `ImagePullBackOff` on a published+installed hook → the install-time pull
   credential for a private image is an operator/cluster question, not an authoring
   one; confirm the digest is correct, then it is theirs.
