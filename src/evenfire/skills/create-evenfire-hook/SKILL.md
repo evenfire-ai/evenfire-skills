@@ -320,7 +320,13 @@ The saga runs ten steps and rolls back on failure; the ones that bite:
 Fail-posture is a CRD rule, not a preference: **`may_deny` requires `failMode:
 closed`** (a deny-authoritative hook that fails open can be bypassed by killing
 the pod). An optimizer or observer should fail **open** — being down should cost
-tokens, never availability. On the tool lane, a `failMode: closed` `postToolUse`
+tokens, never availability. But weigh a **leak-prevention substituter** (a secret
+or PII redactor) on its own terms, even though it holds only `may_substitute_result`
+and is not deny-authoritative: `failMode: open` lets the *unredacted* response
+through when the pod is down — bypassable by killing it, the same argument that
+forces a deny hook closed. If the guarantee is "nothing leaks", prefer `closed`
+and accept that unavailability costs the response; if it is best-effort tidiness,
+`open` is fine. On the tool lane, a `failMode: closed` `postToolUse`
 hook that is unavailable **replaces the tool result with a withheld-content
 notice** — an observer must never be able to do that, so give it `failMode: open`
 and no capabilities.
