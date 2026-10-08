@@ -127,9 +127,10 @@ Image rules:
 - **Immutable tags.** Containers are rendered with `IfNotPresent` whatever the
   recipe says; re-pushing a tag never rolls out.
 - **Numeric non-root `USER`**, and listen on `0.0.0.0`.
-- **Pull access.** Images on the platform registry
-  (`registry.evenfire.ai/<org>/<name>:<tag>`) get the platform pull credential
-  attached automatically; never declare `evenfire-registry-pull`. Any other
+- **Pull access.** Images on the registry the cluster is connected to (for
+  Evenfire's hosted registry, `registry.evenfire.ai/<org>/<name>:<tag>`) get the
+  platform pull credential attached automatically; never declare
+  `evenfire-registry-pull`. Any other
   private registry needs your own `imagePullSecrets` Secret with an ownership
   label.
 - **Architecture** must match the cluster's nodes (usually `linux/amd64`).
@@ -185,8 +186,9 @@ spec:
 Field rules that bite (full list in
 [references/recipe-fields.md](references/recipe-fields.md)):
 
-- Unknown keys are dropped silently (`when:`, `startupProbe:`, `env[].valueFrom`
-  do nothing). `includeWhen` takes only `{{inputs.KEY}}`.
+- Keys the CRD does not define (`when:`, `startupProbe:`, `env[].valueFrom`)
+  never take effect: `kubectl apply` rejects them, but an install through
+  Control API drops them silently. `includeWhen` takes only `{{inputs.KEY}}`.
 - `healthCheck` drives liveness and readiness; the HTTP default path is
   `/health`, so set `path`. There is no `startupProbe`: widen
   `initialDelaySeconds` for slow starts.

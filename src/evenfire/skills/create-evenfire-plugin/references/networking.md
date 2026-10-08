@@ -1,8 +1,8 @@
 # Networking: addresses, Services, and NetworkPolicies
 
 Every plugin namespace denies traffic by default (DNS excepted). A call that no
-policy allows does not fail fast: it hangs until a timeout. WRC opens exactly
-the paths described below and nothing else. Verified against
+policy allows does not fail fast: it hangs until a timeout. These are the paths
+WRC opens for your workloads; anything else stays closed. Verified against
 evenfire-ai/evenfire `dev` at `0b26101eb` (`workflow-recipes/src/reconciler/`).
 
 ## Addresses: always `{{id:host}}` and `{{id:port}}`

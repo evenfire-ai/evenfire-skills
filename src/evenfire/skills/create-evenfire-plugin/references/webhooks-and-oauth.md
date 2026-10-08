@@ -120,8 +120,11 @@ Content-Type: application/json
 | 502 | `{error: "refresh_failed", status, detail}` | The provider refused the refresh |
 | 429 | | Per-recipe rate limit |
 
-On a provider 401, ask the broker again once; it refreshes server side. The
-provider's own API host still goes in the workload's `egressBindings`.
+Ask the broker before each provider call: it returns the stored token while
+it is valid and refreshes it server side shortly before it expires. It does
+not force a refresh, so a provider 401 on a token the broker still considers
+valid means the grant must be reconnected. The provider's own API host still
+goes in the workload's `egressBindings`.
 `POST /api/v1/recipe-oauth/user-token` `{oauthClientId, userId}` and
 `GET /api/v1/recipe-oauth/users?oauthClientId=` serve per-user background
 grants for users who consented.

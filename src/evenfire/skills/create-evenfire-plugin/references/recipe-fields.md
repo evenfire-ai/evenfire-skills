@@ -8,8 +8,11 @@ the limits the platform enforces. Verified against
 `workflow-recipes/` (WRC). Some CRD `description` texts are older than the
 controller; where they disagree this file follows the controller and says so.
 
-Unknown fields are pruned silently at admission (structural schema), so a typo
-such as `when:` or `startupProbe:` disappears without an error.
+Fields the CRD does not define never take effect. `kubectl apply` (strict
+field validation, the kubectl default) and `kubectl-validate` reject them;
+Control API (Marketplace, admin API) sends recipes without that option, so the
+API server drops them silently. A typo such as `when:` or `startupProbe:`
+therefore fails loudly with kubectl and disappears through Control API.
 
 ## Object and metadata
 
@@ -70,7 +73,7 @@ Required: `id`, `type`, `image`.
 | `security` | see below | Per-workload overrides |
 | `schedule`, `timeZone` | five-field cron, IANA zone | `cronjob` only |
 | `serviceName` | string | `statefulset` headless Service name |
-| `backoffLimit` | integer | `job` only |
+| `backoffLimit` | integer, default 3 | `job` only |
 
 Where a workload runs is decided by rule, never by you:
 
