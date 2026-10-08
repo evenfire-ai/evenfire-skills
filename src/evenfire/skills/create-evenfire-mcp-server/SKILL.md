@@ -327,7 +327,7 @@ runtime. By transport:
 
 An MCP server reads its `envSecret` from the namespace it runs in
 (`mcp-server`). If a sibling in `sandbox-recipes` reads the same Secret, create
-it in both namespaces (see `create-evenfire-plugin` section 4.2).
+it in both namespaces (see the Secrets section of the `create-evenfire-plugin` skill).
 
 ## 7. Attach it to a chat agent (Context)
 

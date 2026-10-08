@@ -15,16 +15,19 @@ This repository follows the [Agent Plugins](https://agent-plugins.org/) v1.0.0
 standard: one provider-neutral source of truth is built into portable and
 per-provider distributions.
 
-**Verified against Evenfire `dev` at commit `f9e8d0487`, CRD API
-`clerum.io/v1alpha1`, `clerum-crds` chart `0.8.0`.** Each `SKILL.md` records the
-same pin in its header; see [VERSIONS.md](VERSIONS.md) for how to re-verify after a
-platform bump.
+**Verification pins.** `create-evenfire-plugin` is verified against
+[evenfire-ai/evenfire](https://github.com/evenfire-ai/evenfire) `dev` at commit
+`0b26101eb` (2026-10-08). The other skills were verified on 2026-08-12 against
+commit `f9e8d0487` of the platform's earlier, pre-open-source history, which is
+not in the public repository; re-verify them before relying on details that may
+have changed. CRD API `clerum.io/v1alpha1`, `clerum-crds` chart `0.8.0` in both.
+Each `SKILL.md` records its pin in its header; see [VERSIONS.md](VERSIONS.md).
 
 ## Skills
 
 | Skill | Use it when you need to |
 |---|---|
-| [create-evenfire-plugin](src/evenfire/skills/create-evenfire-plugin/SKILL.md) | Build a plugin end to end: a WorkflowRecipe with a sandbox web UI, a credentialed backend, an optional MCP server and database, webhooks, OAuth, or an agentic/snippet workflow. The credential boundary, the multi-service repo scaffold, every recipe field and enum, egress, validation rules, and the build-and-deploy loop. |
+| [create-evenfire-plugin](src/evenfire/skills/create-evenfire-plugin/SKILL.md) | Build a plugin end to end: a WorkflowRecipe with a web UI inside the Evenfire Desktop app, a credentialed backend, a database, an MCP server, Desktop notifications and LLM calls through the Plugin Workload SDK, webhooks, OAuth, and workflows. Choosing the recipe's shape, where workloads run, networking, Secrets, the Desktop embed contract, validation, install, updates and recovery, with a validated example recipe, container templates and a preflight checker. |
 | [create-evenfire-mcp-server](src/evenfire/skills/create-evenfire-mcp-server/SKILL.md) | Build, test, and package an MCP server (a local image or a remote wrapper): the server code contract, Dockerfile hardening, the `registry.json` schema, the naming rule, local handshake testing, how the platform deploys it, and how to attach it to a chat agent. |
 | [publish-evenfire-plugin](src/evenfire/skills/publish-evenfire-plugin/SKILL.md) | Publish a recipe or an MCP-server connector to the org registry, keep it private, install it, and manage versions: `efrk_` keys, image push, the exact publish payload, the imageRef-equals-name rule, and version retirement. |
 | [run-debug-evenfire](src/evenfire/skills/run-debug-evenfire/SKILL.md) | Bring up a stack (minikube or dev GKE), launch the desktop app, and debug a broken recipe, MCP server, UI, webhook, OAuth, or workflow run: the allowed contexts, the make targets, the port map, and a pod-level failure playbook. |
@@ -85,7 +88,12 @@ Each is runnable on its own and has been exercised against a live system:
 - `run-debug-evenfire/scripts/evenfire-doctor.sh <context> [recipe-base-name]` —
   a read-only cluster health sweep that never mutates anything.
 
-They need `bash`, `curl`, and `jq`; the doctor also needs `kubectl`.
+- `create-evenfire-plugin/scripts/recipe-preflight.py <recipe.yaml>` — checks a
+  recipe for the rules the CRD cannot enforce (the cluster admission policy,
+  Control API at install, and the recipe controller), plus silent pitfalls.
+
+The shell scripts need `bash`, `curl`, and `jq`; the doctor also needs `kubectl`.
+The preflight needs Python 3 with PyYAML.
 
 ## Using these skills
 

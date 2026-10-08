@@ -1,61 +1,272 @@
-# Recipe field and enum reference
+# WorkflowRecipe field reference
 
-Copy these values verbatim. When a value is not here, read the CRD at
-`charts/clerum-crds/crds/workflowrecipe.yaml` and the WRC reconciler rather than
-guessing.
+Every field of `apiVersion: clerum.io/v1alpha1`, `kind: WorkflowRecipe`, with
+the limits the platform enforces. Verified against
+[evenfire-ai/evenfire](https://github.com/evenfire-ai/evenfire) `dev` at
+`0b26101eb`: the CRD schema and CEL rules in
+`charts/clerum-crds/crds/workflowrecipe.yaml` and the controller in
+`workflow-recipes/` (WRC). Some CRD `description` texts are older than the
+controller; where they disagree this file follows the controller and says so.
 
-- `workloads[].type`: `deployment | statefulset | cronjob | job | daemonset`.
-  A `cronjob` workload MUST set the workload-level `schedule`. Max 25 workloads.
-- `workloads[]` required trio: `id`, `type`, `image`. Common optionals:
-  `port`, `replicas` (0-20), `command`, `args`, `env`, `envSecret`,
-  `volumeMounts`, `volumeClaimTemplates`, `resources`, `healthCheck`,
-  `dependsOn`, `imagePullSecrets`, `oauthClientRefs`, `egressBindings`,
-  `includeWhen`, `transport`, `security`, `schedule`.
-- `env[]` items are `{name, value}` strings only. There is **no** `valueFrom`,
-  `envFrom`, or `envFromConfigMap`. The only Secret-to-env path is `envSecret`
-  (`name` + `keys[{secretKey, envVar, optional?}]`).
-- `healthCheck`: `{type: http|tcp|exec, path, port, command[], initialDelaySeconds,
-  periodSeconds, timeoutSeconds, failureThreshold}`. There is **no** `startupProbe`
-  and **no** `successThreshold`; the one `healthCheck` block serves both liveness
-  and readiness. For slow starts, widen `initialDelaySeconds`/`failureThreshold`,
-  or return 503 from the health path until ready.
-- `security` overrides: `runAsUser`/`runAsGroup`/`fsGroup` (each min 1, so root
-  uid 0 is rejected), `addCapabilities` (only `CHOWN|FOWNER|DAC_OVERRIDE|NET_BIND_SERVICE`,
-  enforced twice), `prepareVolumeOwnership`. Setting `runAsUser` forces
-  `runAsNonRoot: true`.
-- `transport.type`: `streamableHttp | sse | stdio` (author `streamableHttp` for
-  own-code HTTP servers). `path` defaults matter, set `/mcp`.
-- `egressBindings[]`: `{egressClass: exact-host|public-web, dns, port, protocol}`.
-  `exact-host` (default) opens one DNS host + port. `public-web` opens public TCP
-  80/443 only and must NOT carry `dns`/`port`. Max 20.
-- `volumeClaimTemplates[]`: `{name, storageClass, accessMode, size}`,
-  `accessMode` is `ReadWriteOnce|ReadOnlyMany|ReadWriteMany`. Use `standard` for
-  minikube, the cluster's real class for GKE (`standard-rwo`) or DO
-  (`do-block-storage`). Max 4.
-- `security.isolationLevel`: `minimal | standard | strict`, additive, default
-  `minimal` (root allowed, writable root FS, all caps dropped, seccomp
-  RuntimeDefault). `standard` adds `runAsNonRoot` + read-only root FS. `strict`
-  adds pod identity pinned to 65534 + `automountServiceAccountToken: false` +
-  the PodSecurity `restricted` label. Prefer `minimal` and use a per-workload
-  `security.runAsUser` when a specific non-root uid is needed.
-- `spec.ui`: `workloadRef` + `port` required; optional `title` (<=100 chars),
-  `icon` (`data:` URI only, <=32 KB), `defaultPath` (starts with a single `/`),
-  `egress.internal[{workloadRef, port}]`, `egress.external[{fqdn, port}]` (DNS
-  only, no CIDR, no wildcard).
-- `spec.bindings[]`: `{from, to, port, protocol}` (from/to/port required). Emits
-  a symmetric NetworkPolicy (egress in the source namespace, ingress in the
-  target namespace), so cross-namespace bindings work.
-- `spec.contextRef`: OPTIONAL, even for a `transport` workload (the CRD calls it
-  "required when a workload exposes an MCP transport", but that is only a
-  description, not a validation rule). Omit it and WRC derives a private
-  `wf-<recipeName>` Context for the recipe's own MCP servers: they are isolated to
-  this recipe and the chat agent cannot see them until an operator adds them to
-  the chat Host's Context (see the `create-evenfire-mcp-server` skill's attach
-  procedure). Set it to a shared Context (for example `context1`) only to register
-  the MCP server there directly, and only on a NON-agentic recipe: on an agentic
-  recipe (any `steps`) setting `contextRef` is REJECTED unless BOTH
-  `spec.security.allowContextRef: true` AND a namespace `WorkflowRecipePolicy`
-  with `allowContextRef: true` exist. The only hard per-transport-workload
-  requirement is `port` (and `stdio` transport is valid only on `deployment`
-  workloads). This is why the common MCP-plus-notifications plugin (a transport
-  workload that also declares `spec.pluginWorkloadSdk`) simply omits `contextRef`.
+Unknown fields are pruned silently at admission (structural schema), so a typo
+such as `when:` or `startupProbe:` disappears without an error.
+
+## Object and metadata
+
+- `metadata.name`: lowercase RFC 1123 label, at most 63 characters. Control
+  API's create route rejects anything else, and a longer name breaks the
+  `clerum.io/recipe` label WRC puts on every object.
+- The recipe object lives in `sandbox-recipes`. Leave `metadata.namespace` out
+  (or set exactly `sandbox-recipes`): the cluster's admission policy rejects any
+  other namespace, and WRC refuses to reconcile one.
+- A registry install renames the object (see
+  [operate.md](operate.md)), so code and scripts must never assume the recipe
+  name you wrote.
+
+## spec at a glance
+
+| Field | What it does | Detail |
+|---|---|---|
+| `description` | Free text shown to operators | Put install prerequisites here (Secrets, grants) |
+| `workloads[]` | Containers WRC deploys | Below; max 25 |
+| `ui` | Marks one workload as the Desktop app view | Below; [ui-embed.md](ui-embed.md) |
+| `bindings[]` | MCP workload to backend network link | Below; [networking.md](networking.md) |
+| `resources[]` | PVCs (and Secrets/ConfigMaps) created with the recipe | Below |
+| `security` | Pod isolation level, `allowContextRef` | Below |
+| `contextRef` | Register MCP workloads in an existing Context | Below |
+| `pluginWorkloadSdk` | Desktop notifications and the LLM prompt bridge | [plugin-workload-sdk.md](plugin-workload-sdk.md) |
+| `agent` | Default LLM provider/model | Workflows, or the prompt-bridge bootstrap |
+| `steps[]`, `triggers`, `scheduling`, `runRetention`, `output`, `mcpServers[]`, `runtimeEgress`, `coordinatorImage` | Workflow runs | [workflows.md](workflows.md) |
+| `webhooks[]`, `oauthClients[]` | Inbound provider webhooks, OAuth clients | [webhooks-and-oauth.md](webhooks-and-oauth.md) |
+| `inputs`, `inputContract`, `profiles`, `activeProfile`, `computed` | Install-time values for templates | Below |
+| `gfs` | Global File System intents | Below |
+| `dependencies[]` | Declared in the CRD | Not acted on by WRC at this revision |
+
+## workloads[]
+
+Required: `id`, `type`, `image`.
+
+| Field | Values and limits | Notes |
+|---|---|---|
+| `id` | `^[a-z][a-z0-9-]*$`, max 63, unique | Labels pods as `clerum.io/workload=<id>` |
+| `type` | `deployment`, `statefulset`, `cronjob`, `job`, `daemonset` | `cronjob` requires `schedule` (CEL) |
+| `image` | string | Use an immutable tag (see `imagePullPolicy`) |
+| `imagePullPolicy` | `Always`, `IfNotPresent`, `Never` | Accepted but not honored: WRC renders `IfNotPresent`, and for `stdio` MCP servers the platform's own setting applies. Never reuse a tag |
+| `port` | integer | Primary container port; the Service and `{{id:port}}` use it |
+| `replicas` | 0 to 20 | The UI workload must be 1 (R16); an operator may set a lower runtime cap for StatefulSets |
+| `command`, `args` | string arrays | Templates are resolved here |
+| `env[]` | `{name, value?}` | Strings only. No `valueFrom`, no `envFrom` |
+| `envSecret` | `{name, keys[{secretKey, envVar, optional?}]}` | The only Secret-to-env path; see [secrets-and-images.md](secrets-and-images.md) |
+| `volumeMounts[]` | `{name, mountPath, subPath?, readOnly?}` | `name` = a `resources[]` PVC id, a `volumeClaimTemplates[].name`, or anything else for an emptyDir |
+| `volumeClaimTemplates[]` | `{name, storageClass, accessMode, size}`, max 4 | StatefulSet only; all four fields required |
+| `resources` | `requests`/`limits` with `cpu`, `memory` | Kubernetes quantities as strings |
+| `healthCheck` | see below | One block drives both liveness and readiness |
+| `dependsOn[]` | workload ids | Deploy order only; opens no network path |
+| `imagePullSecrets[]` | Secret names | Ownership-checked like `envSecret`; see [secrets-and-images.md](secrets-and-images.md) |
+| `oauthClientRefs[]` | max 8, `^[a-z0-9-]{1,63}$` | Background OAuth; not on MCP or UI workloads |
+| `egressBindings[]` | max 20 | See [networking.md](networking.md) |
+| `includeWhen` | `{{inputs.KEY}}` | Not CEL despite the CRD text; see below |
+| `transport` | `{type: streamableHttp\|sse\|stdio, path}` | Makes the workload an MCP server in `mcp-server`; needs `port`; `stdio` only on a `deployment` |
+| `security` | see below | Per-workload overrides |
+| `schedule`, `timeZone` | five-field cron, IANA zone | `cronjob` only |
+| `serviceName` | string | `statefulset` headless Service name |
+| `backoffLimit` | integer | `job` only |
+
+Where a workload runs is decided by rule, never by you:
+
+- has `transport` -> namespace `mcp-server`
+- is `spec.ui.workloadRef` -> namespace `sandbox-ui`
+- anything else -> namespace `sandbox-recipes`
+
+### Names WRC gives your objects
+
+Pods run without a Kubernetes service-account token, and every workload except
+MCP servers runs at the preemptible priority class `clerum-batch`, so the
+scheduler may evict it when the cluster is short of capacity.
+
+On first deploy WRC assigns every workload a recipe-scoped name,
+`<recipe>-<workloadId>-<8 hex>` (trimmed to 63 characters; StatefulSets and
+CronJobs to 52), and stores the mapping in `status.workloadInstances`. The
+Service has that same name. Pods carry the labels `clerum.io/recipe=<recipe>`
+and `clerum.io/workload=<id>`, which is how you find them. Never hardcode
+`<id>.<namespace>.svc.cluster.local` as an address: use `{{<id>:host}}`.
+
+### healthCheck
+
+`{type: http|tcp|exec, path, port, command[], initialDelaySeconds,
+periodSeconds, timeoutSeconds, failureThreshold}`.
+
+- The same check becomes the liveness and the readiness probe. When you leave
+  the timing out, liveness starts after 10 s every 15 s and readiness after 5 s
+  every 10 s.
+- `http` defaults: `path` `/health`, `port` the workload `port` (else 8080).
+  Set `path` explicitly; `/health` is rarely what an app serves.
+- There is no `startupProbe` and no `successThreshold`. For a slow start
+  (migrations), raise `initialDelaySeconds`/`failureThreshold`, or answer 503
+  from the health path until ready.
+
+### security (per workload)
+
+- `runAsUser`, `runAsGroup`, `fsGroup`: integers, minimum 1 (root is rejected).
+  Setting `runAsUser` also forces `runAsNonRoot: true`.
+- `addCapabilities`: all capabilities are dropped first; only `CHOWN`,
+  `FOWNER`, `DAC_OVERRIDE` and `NET_BIND_SERVICE` can be added back (other
+  values are rejected).
+- `prepareVolumeOwnership: true`: adds a root init container that chowns the
+  writable mounts to `runAsUser`. Requires `runAsUser` and a writable mount, and
+  an image with `sh`, `chown`, `chmod` (not distroless). Only for storage that
+  ignores `fsGroup`.
+
+### includeWhen
+
+The value must be exactly `{{inputs.KEY}}`. The workload is deployed only when
+the resolved input is truthy; `false`, `"false"`, `0`, `"0"`, `""`, null and a
+missing key exclude it. Anything else, including a CEL expression such as
+`inputs.x == true`, resolves to nothing and always excludes the workload.
+Bindings and `dependsOn` entries that point at an excluded workload are
+dropped. `includeWhen` is applied only to recipes without `steps`.
+
+## ui
+
+Required: `workloadRef`, `port`.
+
+| Field | Values | Notes |
+|---|---|---|
+| `workloadRef` | an existing workload id | Must be `type: deployment`, `replicas` 1 or unset, no `transport` (R15, R16) |
+| `port` | 1 to 65535 | Must equal the UI workload's `port`, and rpc-proxy only allows its configured ports (default `8080`). Either mistake passes the CRD and the app does not open (`502 port_not_allowed`, or a lookup error for a mismatch) |
+| `title` | max 100 characters | Name in the Desktop app picker |
+| `icon` | `data:<type>;base64,...`, max 32768 characters | Remote URLs are rejected |
+| `defaultPath` | `^/([^/\s][^\s]*)?$`, default `/` | No scheme, no `//` (R18) |
+| `egress.internal[]` | `{workloadRef, port}`, max 25 | UI to backend; the target must not be an MCP workload (R17) |
+| `egress.external[]` | `{fqdn, port, reason?}`, max 20 | DNS names only, no IPs or CIDRs |
+
+Only one UI per recipe. The UI's own outbound access is `ui.egress`, never
+`egressBindings` (WRC skips `egressBindings` on the UI workload).
+
+## bindings[]
+
+`{from, to, port, protocol?}` (`TCP` default, or `UDP`). WRC rejects a binding
+unless it connects exactly one MCP transport workload with one non-transport
+workload. It is how an MCP server in `mcp-server` reaches its backend in
+`sandbox-recipes`. Details in [networking.md](networking.md).
+
+## resources[]
+
+`{id, type: pvc|secret|configmap, ...}`; `id` matches `^[a-z][a-z0-9-]*$`.
+
+- `pvc`: `storageClass`, `size`, `accessMode`. A workload mounts it by listing
+  a `volumeMounts[]` entry whose `name` is the resource `id`. The PVC is created
+  in the namespace of the first workload that mounts it.
+- `secret` / `configmap`: `data` (key/value), and for Secrets `generateKeys`
+  (random 32-character values, created once and never rotated).
+
+Every resource gets a recipe-scoped physical name
+(`<recipe>-<id>-<hash>`, recorded in `status.resourceInstances`). Workloads
+cannot reach a Secret or ConfigMap resource by its `id`: `envSecret.name` is a
+literal Secret name, and a `volumeMounts[]` entry only becomes a PVC when it
+names a `pvc` resource (any other name becomes an empty directory). Use
+`resources[]` for PVCs; have operators create the Secrets your workloads read.
+`{{<id>:<KEY>}}` resolves only keys you wrote in `data`, never generated ones.
+
+## security (recipe level)
+
+- `isolationLevel` (no CRD default; WRC uses `minimal` when unset):
+  - `minimal`: may run as root, writable root filesystem, all capabilities
+    dropped, no privilege escalation, seccomp `RuntimeDefault`.
+  - `standard`: `minimal` plus `runAsNonRoot` and a read-only root filesystem.
+    Mount an emptyDir (any `volumeMounts[]` name that is not a PVC) at every
+    path the process writes, such as `/tmp`.
+  - `strict`: `standard` plus pod user/group/fsGroup 65534, no service account
+    token, and the PodSecurity `restricted` pod label.
+  The CRD description talks about egress; at this revision the level only
+  changes the security context. Network access is always default-deny. A
+  `WorkflowRecipePolicy` in the namespace can require a minimum level.
+- `allowContextRef`: see `contextRef`.
+
+All three plugin namespaces enforce PodSecurity `baseline` and warn on
+`restricted`.
+
+## contextRef
+
+Optional, even with MCP workloads (the CRD description says "required"; the
+controller does not enforce it). Without it WRC creates a private Context
+`wf-<recipe>` that lists the recipe's MCP servers, and no chat agent sees them
+until an operator adds them to the agent's Context (the
+`create-evenfire-mcp-server` skill shows how). On a recipe with `steps`,
+setting `contextRef` is refused unless `spec.security.allowContextRef: true`
+AND a `WorkflowRecipePolicy` in the namespace also allows it.
+
+## Inputs and templates
+
+Templates are resolved in `env[].value`, `command[]` and `args[]` before pods
+are created. An unresolvable reference fails the recipe, so a literal `{{` in
+those fields breaks the install.
+
+| Template | Resolves to |
+|---|---|
+| `{{<id>:host}}` | `<scoped service name>.<namespace>.svc.cluster.local` of a workload that has a `port` |
+| `{{<id>:port}}` | that workload's `port` |
+| `{{inputs.KEY}}` | the resolved input value |
+| `{{computed.NAME}}` | a computed value |
+| `{{<resourceId>:KEY}}` | a key you wrote in a Secret/ConfigMap resource's `data` |
+
+Input precedence, lowest to highest: `inputContract` property `default`s, then
+`spec.inputs`, then `profiles[activeProfile]`, then `computed`. A profile is a
+flat map that overrides input values; it does not patch other spec fields
+(despite the CRD description). `computed[]` items are `{name, expression}`
+where the expression is a small language over `inputs.KEY` (arithmetic, string
+`+`, comparisons, ternary), not `{{...}}` templates.
+
+## gfs
+
+`publishTargets[]` `{drive, target}` and `mounts[]` `{drive, target,
+scopes[]}` (scopes: `gfs.read`, `gfs.write`, `gfs.delete`, `gfs.manage_acl`,
+`gfs.share`). Both are intents: editing them grants nothing, and a mount the
+host identity is not entitled to stays pending.
+
+## status
+
+| Field | Meaning |
+|---|---|
+| `phase` | The enum has 13 values, but in practice you see `deploying`, `active`, `degraded`, `failed`, and `candidate` (set by Retry). Healthy is `active`; a fresh install is `degraded` until every workload is ready |
+| `message` | Last reconcile message; on failure, the reason |
+| `workloads[]` | `{id, type, phase, message, ready}`; for Deployments `ready` means updated, ready and available replicas reached the desired count |
+| `workloadInstances` | workload id to Kubernetes name |
+| `resourceInstances` | resource id to Kubernetes name |
+| `conditions[]` | e.g. `InternalDependenciesReady`, webhook and SDK conditions |
+| `pluginWorkloadSdk` | `{state: validated\|disabled\|degraded\|awaiting_policy, ...}`; see [plugin-workload-sdk.md](plugin-workload-sdk.md) |
+| `workflowExecution`, `steps[]`, `artifacts[]` | Workflow runs; see [workflows.md](workflows.md) |
+
+## Admission rules (CEL), by code
+
+The codes are comments in the CRD; the API server returns only the message.
+
+- Recipe: R1 `agent` needs non-empty `steps` or `pluginWorkloadSdk.promptBridge`;
+  (uncoded) `pluginWorkloadSdk` without `steps` cannot set `triggers`,
+  `scheduling` or `coordinatorImage`; R2 at least one workload or step; R3
+  unique step ids; R4 `scheduling` needs steps; R5/R7 five-field cron; R6
+  `triggers` needs `onDemand` or `schedule`; D13 at most one oauth-broker
+  provider (`codex-subscription` or `grok-subscription`).
+- Steps: R8 `run` xor `instruction`; R9 exactly one of them unless
+  `coordinatorImage`; R10 no `agent` on a `run` step; R11/R14 snippet MCP tools
+  must be listed explicitly, no wildcards; R12/R13 snippet HTTP hosts must be
+  public DNS names also listed in `runtimeEgress.http.allowedHosts`.
+- UI: R15 `workloadRef` exists; R16 deployment, 1 replica, no transport; R17
+  `egress.internal` targets are non-MCP; R18 no scheme in `defaultPath`.
+- OAuth: O1 every client has a consumer (`spec.ui` or a workload's
+  `oauthClientRefs`); O3 unique ids; O4 no `oauthClientRefs` on MCP workloads.
+- SDK: PS1 at least one family; PS2 no `*` in `allowedEventTypes`; PS3 no `*`
+  in `allowedModels`.
+- Webhooks: W1 unique ids; W4 `methods` includes POST; W7 `secretRef` unless
+  `jwt-bearer-jwks`; W8 `replay` with `hmac-sha256-timestamp-body`; W9/W12 JWKS
+  settings; W13 GET only with `setupHandshake`; W14 `meta-hub-challenge` needs
+  its `secretRef` and GET.
+
+The cluster also runs an admission policy on every create and update
+(including `kubectl apply`): the namespace must be `sandbox-recipes`, clients
+may not set `ownerReferences`, and a recipe with `steps` must declare
+`triggers.onDemand` or `triggers.schedule`.
+
+WRC adds its own checks after admission (W2 webhook target, PS4 SDK callers,
+egress, bindings, Secret ownership, limits) and Control API adds more before
+admission; see [operate.md](operate.md).

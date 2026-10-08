@@ -1,0 +1,27 @@
+# UI image: a static single-page app served by unprivileged nginx on 8080.
+# Build context: the ui/ directory (package.json, package-lock.json, nginx/,
+# and your sources). The bundle is built once on the build machine's own
+# platform; only the nginx stage is per target platform.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS build
+WORKDIR /app
+ARG APP_VERSION=dev
+ENV APP_VERSION=${APP_VERSION}
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY . .
+# Must write the bundle to /app/dist with relative asset URLs (Vite: base: './')
+# and no inline <script>.
+RUN npm run build
+
+FROM nginxinc/nginx-unprivileged:1.27-alpine
+# Defaults for a local `docker run`; the recipe sets both from {{api:host}}
+# and {{api:port}}.
+ENV API_HOST=localhost
+ENV API_PORT=8080
+# Makes the image entrypoint export NGINX_LOCAL_RESOLVERS (the pod's DNS
+# server) for the `resolver` line in the template.
+ENV NGINX_ENTRYPOINT_LOCAL_RESOLVERS=1
+COPY --from=build /app/dist /usr/share/nginx/html
+COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
+USER 101
+EXPOSE 8080

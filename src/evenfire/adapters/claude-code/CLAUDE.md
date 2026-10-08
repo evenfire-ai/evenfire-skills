@@ -4,8 +4,8 @@ This overlay bundles four Agent Skills for building on the Evenfire/Clerum platf
 Each lives under `.claude/skills/` and Claude loads one when its description matches
 the task:
 
-- `create-evenfire-plugin` — design and wire a WorkflowRecipe plugin (UI, backend, MCP,
-  webhooks, OAuth, snippets).
+- `create-evenfire-plugin` — design, wire, validate and operate a WorkflowRecipe plugin
+  (Desktop UI, backend, database, MCP, Plugin Workload SDK, webhooks, OAuth, workflows).
 - `create-evenfire-mcp-server` — build or wrap an MCP server/connector.
 - `publish-evenfire-plugin` — publish a recipe or connector to the org registry, version
   it, and install it.
