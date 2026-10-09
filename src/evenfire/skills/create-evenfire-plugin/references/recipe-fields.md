@@ -25,6 +25,15 @@ therefore fails loudly with kubectl and disappears through Control API.
 - A registry install renames the object (see
   [operate.md](operate.md)), so code and scripts must never assume the recipe
   name you wrote.
+- WRC reads two optional metadata entries: the label
+  `clerum.io/workflow-team-id` (scheduled workflows, see
+  [workflows.md](workflows.md)) and the annotation `clerum.io/pvc-retention`
+  (`retain` by default; `delete` makes an uninstall delete the recipe's
+  `resources[]` PVCs, never StatefulSet volumes). A registry install keeps none
+  of your labels or annotations; the admin API keeps only the team label and
+  drops your annotations. The annotation is read at uninstall time, so an
+  operator can add it later with `kubectl annotate`; `upgrade-recipe` keeps
+  the object's existing labels and annotations.
 
 ## spec at a glance
 
@@ -56,12 +65,12 @@ Required: `id`, `type`, `image`.
 | `image` | string | Use an immutable tag (see `imagePullPolicy`) |
 | `imagePullPolicy` | `Always`, `IfNotPresent`, `Never` | Accepted but not honored: WRC renders `IfNotPresent`, and for `stdio` MCP servers the platform's own setting applies. Never reuse a tag |
 | `port` | integer | Primary container port; the Service and `{{id:port}}` use it |
-| `replicas` | 0 to 20 | The UI workload must be 1 (R16); an operator may set a lower runtime cap for StatefulSets |
+| `replicas` | 0 to 20, default 1 | The UI workload must be 1 (R16); an operator may set a lower runtime cap for StatefulSets |
 | `command`, `args` | string arrays | Templates are resolved here |
 | `env[]` | `{name, value?}` | Strings only. No `valueFrom`, no `envFrom` |
 | `envSecret` | `{name, keys[{secretKey, envVar, optional?}]}` | The only Secret-to-env path; see [secrets-and-images.md](secrets-and-images.md) |
 | `volumeMounts[]` | `{name, mountPath, subPath?, readOnly?}` | `name` = a `resources[]` PVC id, a `volumeClaimTemplates[].name`, or anything else for an emptyDir |
-| `volumeClaimTemplates[]` | `{name, storageClass, accessMode, size}`, max 4 | StatefulSet only; all four fields required |
+| `volumeClaimTemplates[]` | `{name, storageClass, accessMode, size}`, max 4 | StatefulSet only; all four fields required. Name a class the cluster has (`kubectl get storageclass`): an empty string turns off dynamic provisioning instead of selecting the default |
 | `resources` | `requests`/`limits` with `cpu`, `memory` | Kubernetes quantities as strings |
 | `healthCheck` | see below | One block drives both liveness and readiness |
 | `dependsOn[]` | workload ids | Deploy order only; opens no network path |
@@ -101,12 +110,16 @@ periodSeconds, timeoutSeconds, failureThreshold}`.
 
 - The same check becomes the liveness and the readiness probe. When you leave
   the timing out, liveness starts after 10 s every 15 s and readiness after 5 s
-  every 10 s.
+  every 10 s. Values you set apply to both probes; an unset `timeoutSeconds`
+  or `failureThreshold` takes the Kubernetes default (1 s, 3).
 - `http` defaults: `path` `/health`, `port` the workload `port` (else 8080).
   Set `path` explicitly; `/health` is rarely what an app serves.
-- There is no `startupProbe` and no `successThreshold`. For a slow start
-  (migrations), raise `initialDelaySeconds`/`failureThreshold`, or answer 503
-  from the health path until ready.
+- There is no `startupProbe` and no `successThreshold`. Because the check is
+  also the liveness probe, a health path that fails while the app starts
+  (migrations) gets the container restarted after about `initialDelaySeconds +
+  (failureThreshold - 1) x periodSeconds` (40 s with the defaults). For a slow
+  start, raise `initialDelaySeconds` or `failureThreshold` until that window
+  covers it; do not answer 503 until ready.
 
 ### security (per workload)
 
@@ -219,6 +232,18 @@ flat map that overrides input values; it does not patch other spec fields
 (despite the CRD description). `computed[]` items are `{name, expression}`
 where the expression is a small language over `inputs.KEY` (arithmetic, string
 `+`, comparisons, ternary), not `{{...}}` templates.
+
+Values an operator sets at install: the registry admin API (`install-recipe`
+and `upgrade-recipe`) accepts `inputValues: {KEY: value}`, which replaces the
+`default` of keys declared in `inputContract.properties` (checked against the
+property's `type`; other keys are ignored). That is the lowest layer, so for a
+key you also set in `spec.inputs` the operator's value is ignored: declare
+tunable values only in `inputContract`. The Control UI Marketplace sends no
+`inputValues`, and an upgrade replaces the whole spec with the new version's,
+so the values must be sent again with every upgrade. Settings an operator must
+be able to change without the API can live in a Secret the workload reads
+through `envSecret` (an optional key); a changed value applies once the pods
+restart.
 
 ## gfs
 

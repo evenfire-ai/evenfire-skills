@@ -17,11 +17,17 @@ Verified against evenfire-ai/evenfire `dev` at `0b26101eb`
 
 1. The recipe declares `spec.pluginWorkloadSdk` (and `spec.agent` for
    promptBridge).
-2. The cluster operator has enabled the SDK on the recipe controller
-   (`PLUGIN_WORKLOAD_SDK_ENABLED=true` on `workflow-recipes`). On a cluster
-   without it, a recipe without `steps` that declares the block deploys
-   nothing at all (status message `Plugin Workload SDK disabled after confirmed
-   teardown`), and `status.pluginWorkloadSdk.state` reads `disabled`.
+2. The cluster operator has enabled the SDK on the recipe controller:
+   `PLUGIN_WORKLOAD_SDK_ENABLED` set to `true` or `1` on the `workflow-recipes`
+   Deployment (namespace `control-plane` in the base manifests); unset means
+   off. An operator can check it with
+   `kubectl -n control-plane exec deploy/workflow-recipes -- printenv PLUGIN_WORKLOAD_SDK_ENABLED`.
+   On a cluster without it, a recipe without `steps` that declares the block
+   deploys nothing at all: the phase stays where it was (`candidate` for a new
+   install), the message reads `Plugin Workload SDK disabled after confirmed
+   teardown`, and `status.pluginWorkloadSdk.state` reads `disabled`. Enabling
+   the flag restarts the controller, which then deploys such a recipe without
+   a Retry.
 3. An operator has saved a grant for each family in Control API (Control UI:
    Plugins, the `⋯` menu, Plugin SDK; or the admin API). Without a grant every
    call is refused, whatever the recipe says.
@@ -42,7 +48,6 @@ spec:
   pluginWorkloadSdk:
     clientNotifications:
       allowedEventTypes: [my-plugin.assigned, my-plugin.mentioned]   # no wildcards (PS2)
-      allowedUserRefs: true
     promptBridge:
       allowedModels: [claude-sonnet-4-6]                               # no wildcards (PS3)
     allowedCallers: [api]      # workload ids; must exist (PS4)
@@ -54,16 +59,23 @@ spec:
 - `promptBridge` requires a resolvable agent: `spec.agent`, or on a workflow a
   step agent with `provider` and `model`. Otherwise the recipe fails with
   `pluginWorkloadSdk.promptBridge requires spec.agent or a step agent with
-  provider + model`.
+  provider + model`. For a recipe without one, the Control UI's Install from
+  Marketplace flow asks the operator for a provider and model and writes
+  `spec.agent`; the other install paths do not.
+- Event types are free-form strings without `*` (at most 128 characters in
+  the recipe); a `<plugin>.<event>` shape keeps grants readable.
 - What the grant says is what runs. In the recipe, `allowedEventTypes`,
   `allowedModels` and `allowedCallers` are validated and used to prefill the
-  grant form; at call time only the grant is checked. Several other CRD knobs
-  are not enforced at this revision: `maxRequestsPerRun`,
-  `maxNotificationsPerRun` (deprecated), `maxInvocationsPerMinute`,
-  `maxNotificationsPerMinute`, `maxConcurrentInvocations`,
-  `maxRequestContentBytes`, `maxTitleBytes`, `maxBodyBytes`,
-  `resultRetentionHours`, `maxAttachments`, `maxAttachmentBytes` and
-  `idempotencyKeyPattern` (the platform uses its own fixed limits, below).
+  grant form; at call time only the grant is checked. The recipe's
+  `clientNotifications.allowedUserRefs` and `allowedTargetRefs` are never read
+  (`allowedTargetRefs` is only checked for wildcards): recipients come from the
+  grant alone. Several other CRD knobs are not enforced at this revision:
+  `maxRequestsPerRun`, `maxNotificationsPerRun` (deprecated),
+  `maxInvocationsPerMinute`, `maxNotificationsPerMinute`,
+  `maxConcurrentInvocations`, `maxRequestContentBytes`, `maxTitleBytes`,
+  `maxBodyBytes`, `resultRetentionHours`, `maxAttachments`,
+  `maxAttachmentBytes` and `idempotencyKeyPattern` (the platform uses its own
+  fixed limits, below).
 - On a recipe with `steps`, PS4 and the pattern check are not run, and callers
   that do not exist are silently dropped.
 
@@ -73,7 +85,7 @@ For each eligible workload WRC sets:
 
 | Variable | Value |
 |---|---|
-| `PLUGIN_WORKLOAD_SDK_ENDPOINT` | `http://wf-<recipe>-mcp-host.sandbox-recipes.svc.cluster.local:8099/sdk` |
+| `PLUGIN_WORKLOAD_SDK_ENDPOINT` | `http://wf-<recipe>-mcp-host.sandbox-recipes.svc.cluster.local:8099/sdk` (the Service name is shortened with a hash when it would exceed 63 characters; use the variable, never build it) |
 | `PLUGIN_WORKLOAD_SDK_TOKEN` | from Secret `wf-<recipe>-plugin-workload-sdk-token`, key `caller-<workloadId>` |
 
 - Eligible: non-MCP workloads other than the UI workload, filtered by
@@ -81,8 +93,9 @@ For each eligible workload WRC sets:
   never get a token, so call the SDK from your backend.
 - The NetworkPolicies to reach the SDK host on port 8099 are created for you.
 - The SDK host runs as the pod `<recipe>-mcp-host` in `sandbox-recipes` and
-  reads caller tokens when it starts. If a caller added after install gets
-  `401 unauthorized`, delete that pod; WRC recreates it.
+  reads caller tokens only when it starts. If a caller added after install gets
+  `401 unauthorized`, delete that pod
+  (`kubectl -n sandbox-recipes delete pod <recipe>-mcp-host`); WRC recreates it.
 - Read both variables at startup and treat a missing endpoint as "SDK not
   available" (local development, or a cluster without the SDK) instead of
   crashing.
@@ -112,14 +125,20 @@ POST $PLUGIN_WORKLOAD_SDK_ENDPOINT/v1/client-notifications
 
 - `userRef` is the platform user's UUID: the value the platform puts in
   `X-Clerum-User` (see [ui-embed.md](ui-embed.md)). Store it when a user first
-  uses your UI. Emails and phone-like values are rejected.
+  uses your UI and send it unchanged: the grant check is an exact string
+  match. Emails and phone-like values are rejected.
+- `target.targetRef` instead names a verified messaging account a user linked
+  in Evenfire (its provider user id), and must be in the grant's
+  `allowedTargetRefs`. Most plugins only need `userRef`.
 - `GET $PLUGIN_WORKLOAD_SDK_ENDPOINT/v1/client-notifications/recipients`
   returns `{recipients: [{userRef, displayName}]}` (display name = email) for
   the users the grant allows.
-- A repeat with the same key and payload returns the same `notificationId`;
-  the same key with a different payload is `422 idempotency_conflict`. Keys are
-  unique per recipe and family (not per workload) for 24 hours, so derive them
-  from your own event id.
+- A repeat with the same key and payload (the same JSON content; key order does
+  not matter) returns the same `notificationId`; the same key with a different
+  payload is `422 idempotency_conflict`. Keys are unique per recipe and family
+  (not per workload) for 24 hours, so derive them from your own event id, and
+  after a timeout or network error resend the same key and payload: the user
+  still gets one notification.
 
 What the user sees: a bell entry labelled "Plugin notification" (text = body,
 else title) and a native notification (subject to their notification
@@ -185,11 +204,22 @@ Body: `{"error": code, "message", "retryable", "reason"?}`.
 | 429 | `quota_exceeded` |
 | 503 | `provider_unavailable`, `protocol_mismatch`, `sdk_unavailable` (the SDK host's binding changed; retry) |
 
+What a 403 means:
+
+| `error` | Cause |
+|---|---|
+| `capability_not_declared` | No grant is saved for that family |
+| `provider_policy_denied` | The grant is not active (revoked, disabled, or never reviewed by an operator) or, for notifications, names no usable recipient (an existing user with an email, or a verified linked account). A promptBridge call also gets it while the SDK host finds no ready grant |
+| `caller_not_allowed` | The calling workload is not in the grant's `allowedCallers` |
+| `event_type_not_allowed` | `eventType` is not in the grant's `allowedEventTypes` |
+| `target_not_allowed` | `userRef` or `targetRef` is not in the grant; for promptBridge, a target the grant does not list |
+| `scope_denied` | The SDK host's own platform token lacks the SDK scope: a platform problem for the operator |
+
 `reason` (when present): `rate_limited`, `insufficient_quota`, `auth`,
 `provider_unavailable`, `credential_unavailable`, `configuration`, `timeout`,
-`network`, `outcome_unknown`. With `outcome_unknown` the provider may have run:
-investigate before retrying, and retry with a new key. A promptBridge call
-with no ready grant fails with `403 provider_policy_denied`.
+`network`, `outcome_unknown`. Only promptBridge reports `outcome_unknown`: the
+provider may have run, so investigate before retrying, and retry with a new
+key. A notification that timed out is resent with the same key and payload.
 
 ### Limits
 
@@ -202,11 +232,29 @@ with no ready grant fails with `403 provider_policy_denied`.
 ## The grant (operator side)
 
 Plugin authors cannot create grants; document what the operator must enter in
-`spec.description`. Admin API: `POST /api/v1/admin/plugin-workload-sdk/grants`
-(upsert per recipe and family), `GET` and `DELETE .../grants/:id`.
+`spec.description`. On the Control UI's Plugin SDK page the operator picks the
+recipe and family, types the event types and the allowed callers (workload
+ids), and selects "Allowed users" by name or email, so nobody has to look up a
+UUID; per-minute quota overrides can only be set through the API. Admin API:
+`POST /api/v1/admin/plugin-workload-sdk/grants` (upsert per recipe and
+family), `GET`, and
+`DELETE .../grants/<id>?recipeNamespace=<ns>&recipeName=<name>`:
+
+```json
+{
+  "recipeNamespace": "sandbox-recipes",
+  "recipeName": "<in-cluster name>",
+  "capabilityFamily": "clientNotifications",
+  "allowedCallers": ["api"],
+  "allowedEventTypes": ["my-plugin.assigned", "my-plugin.mentioned"],
+  "allowedUserRefs": ["<user UUID>"]
+}
+```
 
 - Both families: `recipeNamespace` (`sandbox-recipes`), `recipeName` (the
-  in-cluster name), `capabilityFamily`, and a non-empty `allowedCallers`.
+  in-cluster name), `capabilityFamily` (`clientNotifications` or
+  `promptBridge`), and a non-empty `allowedCallers`. Each list holds at most
+  64 entries of at most 256 characters.
 - clientNotifications: non-empty `allowedEventTypes` (exact strings), and
   `allowedUserRefs` (user UUIDs) and/or `allowedTargetRefs`, with at least one
   user that exists.
@@ -233,4 +281,7 @@ Plugin authors cannot create grants; document what the operator must enter in
 
 The recipe phase stays `active` while the state is `awaiting_policy`; only the
 message (`Plugin Workload SDK operator policy pending (<reason>)`) and this
-field show it. A grant change is picked up within seconds.
+field show it. A grant change is picked up within seconds. The SDK host does
+affect the phase in two cases: while it starts the recipe is `deploying`, and
+while its provider is unavailable the recipe is `degraded`. In both the recipe
+is not `active`, so the Desktop does not open the plugin.

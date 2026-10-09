@@ -22,15 +22,34 @@ if (embedBasename) {
 
 /**
  * Build a URL for your own backend. Pass a path WITHOUT a leading slash
- * ("api/items"): a leading slash would escape the embed prefix.
+ * ("api/items"): a leading slash would escape the embed prefix. Outside the
+ * Desktop there is no pinned base, so paths resolve from the site root.
  */
 export function apiUrl(path: string): string {
-  return new URL(path.replace(/^\/+/, ''), document.baseURI).href
+  const base = embedBasename ? document.baseURI : `${window.location.origin}/`
+  return new URL(path.replace(/^\/+/, ''), base).href
+}
+
+// The Desktop accepts one refresh per 30 s per view and rejects the others,
+// so concurrent 401s share a single refresh.
+let refreshInFlight: Promise<void> | null = null
+
+function refreshSession(refresh: () => Promise<void>): Promise<void> {
+  if (!refreshInFlight) {
+    refreshInFlight = refresh()
+      // Rejected when another refresh ran in the last 30 s (the cookie is
+      // fresh, so the retry works) or when the view stopped refreshing.
+      .catch(() => undefined)
+      .finally(() => {
+        refreshInFlight = null
+      })
+  }
+  return refreshInFlight
 }
 
 /**
  * fetch() for your backend: asks for JSON so platform status answers come back
- * as JSON instead of an HTML page, and recovers once from an expired embed
+ * as JSON instead of an HTML page, and retries once after an expired embed
  * session (401 sandbox_ui_session_invalid / sandbox_ui_session_required).
  */
 export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
@@ -43,11 +62,8 @@ export async function apiFetch(path: string, init: RequestInit = {}): Promise<Re
   const code = (body as { error?: string } | null)?.error
   if (code !== 'sandbox_ui_session_invalid' && code !== 'sandbox_ui_session_required') return res
   const clerum = (window as unknown as { clerum?: { requestSessionRefresh?: () => Promise<void> } }).clerum
-  if (typeof clerum?.requestSessionRefresh !== 'function') return res
-  try {
-    await clerum.requestSessionRefresh() // at most once per 30 s per view
-  } catch {
-    return res
-  }
+  const requestSessionRefresh = clerum?.requestSessionRefresh
+  if (typeof requestSessionRefresh !== 'function') return res
+  await refreshSession(() => requestSessionRefresh.call(clerum))
   return send()
 }

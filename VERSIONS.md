@@ -31,6 +31,8 @@ its commit. Update that line and this table together.
    registry publish contract, and the Makefile targets.
 3. For `create-evenfire-plugin`, also validate
    `assets/recipe-ui-plugin.yaml` against the new CRD (`kubectl-validate
-   --local-crds`), run `scripts/recipe-preflight.py` on it, and rebuild the
-   container templates in `assets/`.
-4. Update the commit here and in each re-verified `SKILL.md` header.
+   --local-crds`), run `scripts/recipe-preflight.py --crd` on it, and rebuild
+   the container templates in `assets/`.
+4. Update the commit here and in each re-verified `SKILL.md` header. In
+   `create-evenfire-plugin`, the CRD download URL in `SKILL.md` section 9 and
+   `references/operate.md` carries the full commit too.

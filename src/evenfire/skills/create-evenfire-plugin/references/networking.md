@@ -82,7 +82,10 @@ A workload with `transport` runs in `mcp-server`. WRC creates its Service and an
 - To reach its backend in `sandbox-recipes`, declare a binding:
   `bindings: [{ from: mcp, to: api, port: 8080 }]`. WRC rejects any binding
   that does not connect exactly one MCP workload with one non-MCP workload, so
-  bindings are never the tool for backend-to-backend traffic.
+  bindings are never the tool for backend-to-backend traffic. Path 1 also
+  covers HTTP MCP workloads: when the MCP's `env` names the backend with
+  `{{api:host}}`, WRC writes the cross-namespace policies for that path too.
+  The binding is the documented link, so declare it in any case.
 - For outbound internet, the MCP workload's `egressBindings` accept
   `exact-host` entries and also `public-web` (public TCP 80/443 with private
   and metadata ranges blocked; it must not carry `dns`, `port` or `protocol`).

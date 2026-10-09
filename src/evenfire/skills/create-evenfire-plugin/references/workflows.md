@@ -145,9 +145,13 @@ with `allowedTools.include`.
 
 ## When a run starts
 
+This section is about recipes with `steps`. A recipe without them settles on
+`active` with the message `All workloads deployed` (with the SDK and no grant
+yet, `Plugin Workload SDK operator policy pending (<reason>)`).
+
 - If any step needs an agent host (an `instruction`, a step `agent`,
-  `requiresApproval`, or `mcpServers` on an agentic step), or the recipe
-  declares `spec.pluginWorkloadSdk` on a cluster with the SDK enabled,
+  `requiresApproval`, or `mcpServers` on an agentic step), or the workflow
+  also declares `spec.pluginWorkloadSdk` on a cluster with the SDK enabled,
   installing only registers the workflow: the recipe goes `active` with
   "Workflow trigger infrastructure registered", and each run starts from a
   trigger as its own run-scoped child recipe.

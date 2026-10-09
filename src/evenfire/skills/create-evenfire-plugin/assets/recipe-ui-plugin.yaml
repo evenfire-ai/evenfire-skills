@@ -4,7 +4,9 @@
 # webhooks are possible and image changes roll out when you edit the recipe.
 #
 # Replace registry.example.com/acme/notes-* with your images (immutable tags),
-# and `standard` with a StorageClass your cluster has.
+# and `standard` with a StorageClass your cluster has (`kubectl get
+# storageclass`; the field is required, and an empty string turns off dynamic
+# provisioning instead of selecting the default class).
 apiVersion: clerum.io/v1alpha1
 kind: WorkflowRecipe
 metadata:
@@ -32,7 +34,7 @@ spec:
   workloads:
     - id: db
       type: statefulset
-      image: postgres:16-alpine
+      image: postgres:16-alpine # a major-version tag; pin a patch tag or digest for repeatable installs
       port: 5432
       env:
         - { name: POSTGRES_USER, value: notes }

@@ -16,6 +16,8 @@ COPY --from=build /app/package.json ./
 # (Assumes runtime dependencies; with none, npm creates no node_modules.)
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
+# Copy any runtime files the build does not put in dist, for example:
+# COPY --from=build /app/migrations ./migrations
 # A numeric non-root user (the node image's "node" user is uid 1000).
 USER 1000
 EXPOSE 8080

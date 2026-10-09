@@ -25,8 +25,10 @@ envSecret:
   `CreateContainerConfigError` until the key appears.
 - `optional: true` omits the variable when the key is absent at reconcile time.
   WRC watches referenced Secrets: when a key is added or removed, or an
-  ownership label changes, it reconciles the recipe (after a short debounce)
-  and the variable appears on the next rollout.
+  ownership label changes, it reconciles the recipe (after a short debounce).
+  On a recipe without `steps` that re-renders the workload with or without the
+  variable, and the changed pod template rolls out by itself (for recipes with
+  `steps`, see the rollout caveat in [workflows.md](workflows.md)).
 - Changing only a value restarts nothing. Environment variables are read at
   container start, so delete the pods (or restart the rollout) after rotating.
 - There is no `valueFrom`, no `envFrom`, and no Secret volume mount.
@@ -117,12 +119,16 @@ without each, and where each value comes from.
 - **Where to host:** any registry the cluster can pull from. Images on the
   platform registry (`registry.evenfire.ai/<org>/<name>:<tag>`) need no pull
   Secret: WRC attaches the platform pull credential `evenfire-registry-pull`
-  automatically to any workload whose image host is the configured registry.
+  automatically to any workload whose image host is the configured registry
+  (the host of `CLERUM_REGISTRY_URL` in the `control-api-config` ConfigMap,
+  namespace `control-plane`; when it is unset, no image gets the credential).
   Never list `evenfire-registry-pull` yourself (install is rejected). For any
   other private registry, list your own Secret in `imagePullSecrets`. Unlike
   other Secrets it must exist **before** install, in the workload's namespace,
-  with an ownership label; for a registry install use `clerum.io/shared=true`
-  (or the predictable generated name as owner). Create it with kubectl, since
+  with an ownership label; for a registry install use `clerum.io/shared=true`,
+  or the generated name as owner (it can be computed before install, see
+  [operate.md](operate.md#installing)). Control API refuses the install with
+  `422` while that Secret is missing. Create it with kubectl, since
   the Control UI writes only Opaque Secrets:
 
   ```bash

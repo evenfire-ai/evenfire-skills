@@ -71,7 +71,8 @@ The presence of `spec.steps` changes how the whole recipe behaves.
 - A UI plugin that needs periodic work can run its own `cronjob` workload.
 - On a cluster without the SDK enabled, a stepless recipe that declares
   `pluginWorkloadSdk` deploys **nothing**; keep that block out of recipes meant
-  for such clusters.
+  for such clusters. An operator can check the flag before installing
+  ([references/plugin-workload-sdk.md](references/plugin-workload-sdk.md)).
 
 ## 2. Where things run, and who the user is
 
@@ -189,9 +190,10 @@ Field rules that bite (full list in
 - Keys the CRD does not define (`when:`, `startupProbe:`, `env[].valueFrom`)
   never take effect: `kubectl apply` rejects them, but an install through
   Control API drops them silently. `includeWhen` takes only `{{inputs.KEY}}`.
-- `healthCheck` drives liveness and readiness; the HTTP default path is
-  `/health`, so set `path`. There is no `startupProbe`: widen
-  `initialDelaySeconds` for slow starts.
+- `healthCheck` is both the liveness and the readiness probe, and the HTTP
+  default path is `/health`, so set `path`. A health path that fails during a
+  slow start gets the container restarted (there is no `startupProbe`): widen
+  `initialDelaySeconds` or `failureThreshold` instead of answering 503.
 - The UI workload: `deployment`, 1 replica, no `transport`, `port` equal to
   `spec.ui.port` (8080).
 - Any `{{...}}` in `env`, `command` or `args` must be a valid template, or the
@@ -259,9 +261,15 @@ WRC opens these paths ([references/networking.md](references/networking.md)):
   user's identity, team, agents, shared files and local notifications.
 - Downloads are blocked, `window.open` and outside links go to the user's
   browser, the async Clipboard API is denied. Deep links:
-  `<profile UI host>/open/apps/sandbox-recipes/<recipe>?path=<route>`.
+  `<profile UI host>/open/apps/sandbox-recipes/<recipe>?path=<route>`
+  (optionally `&team=<teamId>`).
 - Send `Accept: application/json` on API calls; otherwise "updating" and
   "removed" answers come back as HTML pages.
+- The Desktop opens the plugin only while the whole recipe is `active`. One
+  workload that is not Ready (the MCP server included), a Secret without an
+  ownership label, or a required webhook without its Secret makes it
+  `degraded` and takes the UI offline, so keep optional parts optional
+  (`optional: true` on webhooks and Secret keys).
 
 ## 8. Optional capabilities
 
@@ -272,9 +280,13 @@ WRC opens these paths ([references/networking.md](references/networking.md)):
   `/v1/prompt-bridge` from the backend with `$PLUGIN_WORKLOAD_SDK_TOKEN`. An
   operator grant is mandatory; recipients are user UUIDs; the plugin's access
   list and the notification recipients are separate lists.
-- **Webhooks** ([references/webhooks-and-oauth.md](references/webhooks-and-oauth.md)):
-  stepless recipes only; the platform verifies HMAC, bearer or JWT signatures
-  and forwards to your handler workload.
+- **Webhooks** ([references/webhooks-and-oauth.md](references/webhooks-and-oauth.md),
+  with a YAML example): stepless recipes only; the platform verifies an HMAC
+  signature or a static bearer token and forwards to your handler workload.
+  `jwt-bearer-jwks` and the `stripe-verify` handshake pass admission but do
+  not work at this revision. A required webhook whose Secret is missing stops
+  every webhook of the recipe and degrades it; mark webhooks `optional` unless
+  the plugin cannot work without them.
 - **OAuth**: background (a workload gets provider tokens from the platform's
   broker) or from the UI (`clerum://oauth?clientId=...`).
 - **Workflows** ([references/workflows.md](references/workflows.md)): steps,
@@ -288,12 +300,23 @@ WRC opens these paths ([references/networking.md](references/networking.md)):
 
 ([references/operate.md](references/operate.md))
 
-1. **Admission rules, offline:**
-   `kubectl-validate recipe.yaml --local-crds <evenfire>/charts/clerum-crds/crds --version 1.30`
-   (or `kubectl apply --dry-run=server -n sandbox-recipes -f recipe.yaml`).
-2. **Controller and Control API rules:**
-   `python3 scripts/recipe-preflight.py recipe.yaml` (needs PyYAML). Optional:
-   `POST /api/v1/admin/recipes/validate` with an admin session.
+1. **Validate offline.** Download the CRD of the pinned revision (no checkout
+   needed), run the preflight with it, then `kubectl-validate` for the CEL
+   rules:
+
+   ```bash
+   mkdir -p crds && curl -fsSL -o crds/workflowrecipe.yaml \
+     https://raw.githubusercontent.com/evenfire-ai/evenfire/0b26101eb247adcc44f70d39451f3e82c3225d47/charts/clerum-crds/crds/workflowrecipe.yaml
+   python3 scripts/recipe-preflight.py --crd crds/workflowrecipe.yaml recipe.yaml   # needs PyYAML
+   kubectl-validate recipe.yaml --local-crds crds --version 1.30
+   ```
+
+   The preflight reports schema errors (unknown fields, types, enums, limits)
+   and the rules that only run after admission. Instead of `kubectl-validate`
+   you can use `kubectl apply --dry-run=server -n sandbox-recipes -f
+   recipe.yaml` against a cluster.
+2. **Optional, with an admin session:** `POST /api/v1/admin/recipes/validate`
+   runs the Control API checks without creating anything.
 3. **Install** from the registry (Marketplace; the in-cluster name becomes
    `recipe-<entry slug>-v<version>-<8 hex>` and your labels are dropped), with
    the admin API (`POST /api/v1/admin/recipes`, keeps your name), or with
@@ -303,9 +326,11 @@ WRC opens these paths ([references/networking.md](references/networking.md)):
    Teams tabs); for the SDK, operator grants; for chat agents, attach the MCP
    server.
 5. **Verify:** `status.phase` is `active`, `status.message` is "All workloads
-   deployed", and pods labelled `clerum.io/recipe=<name>` are Ready in every
-   namespace the plugin uses. The Desktop lists the app only while it is
-   `active` (a fresh install is `degraded` until its pods are ready).
+   deployed" (with the SDK and no grant yet, "Plugin Workload SDK operator
+   policy pending (...)"), and pods labelled `clerum.io/recipe=<name>` are
+   Ready in every namespace the plugin uses. The Desktop lists the app only
+   while it is `active` (a fresh install is `degraded` until its pods are
+   ready).
 6. **Update** with a new image tag and a changed recipe. For a registry
    install, `POST /api/v1/admin/registry/upgrade-recipe` changes it in place;
    installing the new version from the Marketplace creates a second recipe.
@@ -323,10 +348,11 @@ WRC opens these paths ([references/networking.md](references/networking.md)):
 | A call to a sibling or the internet hangs | No network path (section 5) |
 | The UI pod crash-loops with `host not found in upstream` | nginx with a literal upstream host |
 | The Desktop shows a blank panel | Absolute asset or API URLs (`/assets/...`, `fetch('/api')`), or an inline script blocked by the CSP |
-| The Desktop says "is updating" forever | The recipe is not `active` or the UI pod is not Ready |
+| The Desktop says "is updating" forever | The recipe is not `active`: some workload is not Ready (the MCP server included), a required Secret key or webhook Secret is missing, a Secret is unlabeled, or the SDK host is starting; or the UI pod is not Ready |
 | A workload silently missing | Unknown key pruned, `includeWhen` that is not `{{inputs.KEY}}`, or a Secret without an ownership label |
 | New image never runs | Tag reused, or a recipe with `steps` (and no `pluginWorkloadSdk`) that is already `active` |
-| Webhook URL fails | The recipe has `steps` |
+| Webhook URL fails | The recipe has `steps`; a required webhook's Secret is missing; or the webhook uses `jwt-bearer-jwks` or `stripe-verify` |
+| The container restarts during startup | The health path fails while the app starts; widen `initialDelaySeconds`/`failureThreshold` |
 | Notifications never arrive | No operator grant, user not in the grant, event type not in the grant, or the SDK is disabled |
 | `promptBridge` returns `idempotency_conflict` | Key reused; results are not stored, so persist them yourself |
 | User data mixed between people | State keyed by a cookie or by browser storage instead of `X-Clerum-User` |
@@ -348,13 +374,16 @@ WRC opens these paths ([references/networking.md](references/networking.md)):
 - [ ] No credentials in `env`; every `envSecret`/`imagePullSecrets` Secret is
       documented in `spec.description`, with its namespaces and keys.
 - [ ] `healthCheck` set with an explicit `path`, and room for slow starts.
+- [ ] Whatever the plugin can live without is optional (`optional: true` on
+      webhooks and Secret keys), so a missing value does not take the UI
+      offline.
 - [ ] Images: immutable tags, numeric non-root user, `0.0.0.0`, pullable by the
       cluster.
 - [ ] UI: relative URLs plus runtime `<base>`, SPA fallback, no inline scripts
       or remote assets, `Accept: application/json` on API calls, session
       recovery on 401, theme from `window.clerum`.
 - [ ] Backend trusts identity only from `X-Clerum-User` and keys user data by it.
-- [ ] `kubectl-validate` and `scripts/recipe-preflight.py` pass.
+- [ ] `scripts/recipe-preflight.py --crd` and `kubectl-validate` pass.
 - [ ] After install: Secrets labelled, access granted, SDK grants (if any),
       `status.phase` `active`, pods Ready in every namespace, the app opens in
       the Desktop.

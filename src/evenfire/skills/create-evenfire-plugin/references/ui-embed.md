@@ -36,13 +36,21 @@ What your UI server receives:
   sessions based on cookies do not work. Do not put your own tokens in
   `Authorization` either.
 - `Host` is the internal Service name; do not build URLs from it.
+- Nothing else about the user: no name, email, team or role. Names come from
+  `clerum.identity.get()` in the UI (behind consent, so treat what the UI posts
+  as display text) or, for users in the SDK grant, from the SDK recipients
+  list; team and role only from `clerum.org.get()` in the UI. A role check the
+  backend must enforce needs your own data, keyed by the user's UUID.
 
 Only rpc-proxy can reach the UI pod (`sandbox-ui` denies all other ingress),
 which is why `X-Clerum-User` can be trusted there. Pass it on to the backend
 explicitly (the nginx asset does). Inside the recipe, other workloads that can
 reach the backend (an MCP server, the webhook gateway) could send that header
-too; give them their own credential (a shared token from a Secret) when the
-backend must tell them apart.
+too; give them their own credential when the backend must tell them apart, for
+example `Authorization: Bearer <token>` from a Secret shared by the MCP server
+and the backend. That header cannot arrive through the UI: rpc-proxy never
+forwards one and the nginx asset clears it. Webhook calls carry the gateway's
+`x-clerum-webhook-*` headers ([webhooks-and-oauth.md](webhooks-and-oauth.md)).
 
 ## Serving the SPA under a prefix
 
@@ -109,18 +117,23 @@ backend), and you cannot frame your own pages. Inline styles are allowed.
   happens, so the first request after restoring can get `401
   {"error":"sandbox_ui_session_invalid"}` (or `..._required`).
 - Recover with `await window.clerum.requestSessionRefresh()`, then retry once.
-  It is limited to one call per 30 s per view and throws when called too soon.
-  If a refresh fails, the Desktop stops refreshing that view and tells the
-  user to reopen the app.
+  It resolves with no value, even when the re-mint itself failed (the retry
+  then gets the 401 again), and it rejects when the view's last refresh was
+  less than 30 s ago or the view has stopped refreshing. Share one refresh
+  among concurrent 401s and retry once after it settles either way, as
+  [../assets/embed-base.ts](../assets/embed-base.ts) does. If a refresh fails,
+  the Desktop stops refreshing that view and tells the user to reopen the app.
 - Removing a user's access takes effect when their session cookie expires (up
   to 5 minutes).
 
 ## The Plugin UI SDK (`window.clerum`)
 
 Only present inside the Desktop: feature-detect it and degrade gracefully in a
-plain browser. Calls resolve to
-`{ok: true, data} | {ok: false, error: {code, message, retryable}}`; still wrap
-them, because an older Desktop may lack a method.
+plain browser. The capability calls below resolve to
+`{ok: true, data} | {ok: false, error: {code, message, retryable}}`; a call
+the user has not allowed gets `code: 'permission_denied'`. Still wrap them,
+because an older Desktop may lack a method. The Desktop source at this
+revision locks Electron 41.10.7.
 
 | Call | Capability | Returns | Asks the user |
 |---|---|---|---|
@@ -135,15 +148,18 @@ them, because an older Desktop may lack a method.
 | `clerum.gfs.open(uri)` | `gfs.open` | `{opened}`: shows a `gfs://` file in the Desktop's viewer | no |
 | `clerum.notifications.notify({title, body?, ref?})` | `notifications.notify` | `{delivered, reason?}` | yes |
 
-- Permissions: `clerum.sdk.permissions(ids?)` reads grants without prompting;
-  `clerum.sdk.requestPermissions(ids)` (1 to 8 ids) shows one consent modal for
-  the missing ones. A view may show at most 3 modals, 10 s apart; an
+- Permissions: `clerum.sdk.permissions(ids?)` reads grants without prompting
+  (`data: {granted: {<id>: boolean}}`); `clerum.sdk.requestPermissions(ids)`
+  (1 to 8 ids) shows one consent modal for the missing ones (`data: {granted,
+  all}`). A view may show at most 3 modals, 10 s apart; an
   unanswered modal (120 s) counts as denied, and a denial sticks until the
   plugin is reopened. Grants persist until the user revokes them. Ask once,
   batched, and check `permissions()` first so returning users see nothing.
-- Events: `clerum.sdk.on(cb)` (returns an unsubscribe function) delivers
-  `theme.changed {theme}`, `permission.changed {capability, granted}`,
-  `session.changed {authenticated}` and `notification.clicked {ref}`.
+- Events: `clerum.sdk.on(cb)` (returns an unsubscribe function) calls `cb`
+  with one flat object per event: `{type: 'theme.changed', theme}`,
+  `{type: 'permission.changed', capability, granted}`,
+  `{type: 'session.changed', authenticated}` and
+  `{type: 'notification.clicked', ref}` (`ref` may be `null`).
 - Rate limits per capability (for example `gfs.open` 6/min,
   `notifications.notify` 2/min and 20/h) and 120 calls/min per plugin in total;
   over the limit you get `rate_limited`. `clerum.sdk.capabilities()` lists what
@@ -178,11 +194,11 @@ them, because an older Desktop may lack a method.
 Link to a place in your plugin with
 `<profile UI host>/open/apps/<namespace>/<recipe>?path=<route>&team=<teamId>`
 (a web page that hands over to the Desktop), or the Desktop protocol
-`evenfire://app/<namespace>/<recipe>?path=<route>&team=<teamId>`. The user
-confirms before the Desktop opens it. `path` must start with a single `/`
-(max 4096 characters, no `?`, `#`, `\` or dot segments); queries and fragments
-are not carried. The Desktop's "copy link" produces the same form from the
-current pathname. Plugins usually take the base
+`evenfire://app/<namespace>/<recipe>?path=<route>&team=<teamId>` (`team` is
+optional). The user confirms before the Desktop opens it. `path` must start
+with a single `/` (max 4096 characters, no `?`, `#`, `\` or dot segments);
+queries and fragments are not carried. The Desktop's "copy link" produces the
+same form from the current pathname. Plugins usually take the base
 (`https://<profile UI host>/open/apps/sandbox-recipes/<recipe>`) as a
 configurable env value, because the recipe cannot know it.
 
@@ -219,7 +235,12 @@ loads and show a Connect button when it says `no_grant`.
   page in the Control UI. A team grant counts only while the user works in that
   team in the Desktop. A fresh install is visible to nobody until granted;
   being an admin does not bypass it.
-- The Desktop lists only plugins that are `active`.
+- The Desktop lists and opens a plugin only while its recipe is `active` and
+  the UI pod is Ready. Anything that makes the recipe `degraded` takes the
+  whole UI offline: any workload that is not Ready (the MCP server included),
+  a Secret without an ownership label, or a required webhook without its
+  Secret. Keep optional parts optional (`optional: true` on webhooks and on
+  Secret keys).
 - One plugin view is open at a time. Switching to another Desktop section
   closes it (in-memory state is lost; the route is restored), and the HTTP
   cache is cleared every time the view opens.

@@ -5,45 +5,64 @@ Verified against evenfire-ai/evenfire `dev` at `0b26101eb`
 `workflow-recipes/src/reconciler/workflowRecipeReconciler.ts`,
 `control-ui/app/workflow-recipes/`).
 
-## Validation happens in three places
+## Where validation happens
+
+Three components validate a recipe: the Kubernetes API server (admission),
+Control API (with different checks per route), and WRC.
 
 | Layer | Runs on | Checks |
 |---|---|---|
 | CRD admission (schema + CEL) | every create and update, including `kubectl apply` | types, enums, limits, the R/W/O/PS rules |
-| Control API, registry install | Marketplace installs | limits, `public-web` on non-MCP workloads, Secret references (reserved names, owned by another recipe) |
+| Control API, registry install | Marketplace installs | limits, `public-web` on non-MCP workloads, Secret references (reserved names, owned by another recipe, a missing `imagePullSecrets` Secret) |
 | Control API, create/edit/validate | the Control UI recipe editor and `/api/v1/admin/recipes` | all of the above plus name, inline secrets in `env`, template references, namespace policies, name availability, the scheduled-recipe team label |
 | WRC (the recipe controller) | every reconcile, after install | bindings shape, `egressBindings`, internal dependencies, unresolved templates, SDK callers (PS4), webhook targets (W2), Secret ownership, DNS of egress hosts |
 
 `kubectl apply` skips the Control API layers. An admin session can run the
-second layer without creating anything: `POST
+Control API create checks without creating anything: `POST
 /api/v1/admin/recipes/validate?mode=create` with the recipe as JSON returns
 `200 {valid: true, pendingCredentials}` or `422 {valid: false, errors}`.
 
-Check layer 1 before installing, without a cluster, with
-[kubectl-validate](https://github.com/kubernetes-sigs/kubectl-validate) and
-the CRD file from the platform repository:
+Check before installing, without a cluster. Download the CRD file of the
+pinned revision, run this skill's preflight with it (schema errors, then the
+Control API and WRC rules that admission cannot see), and
+[kubectl-validate](https://github.com/kubernetes-sigs/kubectl-validate) for
+the CEL rules:
 
 ```bash
-kubectl-validate recipe.yaml --local-crds <evenfire>/charts/clerum-crds/crds --version 1.30
+mkdir -p crds && curl -fsSL -o crds/workflowrecipe.yaml \
+  https://raw.githubusercontent.com/evenfire-ai/evenfire/0b26101eb247adcc44f70d39451f3e82c3225d47/charts/clerum-crds/crds/workflowrecipe.yaml
+python3 scripts/recipe-preflight.py --crd crds/workflowrecipe.yaml recipe.yaml
+kubectl-validate recipe.yaml --local-crds crds --version 1.30
 ```
 
-or against a cluster: `kubectl apply --dry-run=server -n sandbox-recipes -f
-recipe.yaml`. Then run this skill's `scripts/recipe-preflight.py recipe.yaml`,
-which checks the Control API and WRC rules that admission cannot see.
+Against a cluster, `kubectl apply --dry-run=server -n sandbox-recipes -f
+recipe.yaml` replaces `kubectl-validate`.
 
 ## Installing
 
 - **From the registry** (the Control UI Marketplace, which is where the
   Plugins page's Install leads, or `POST
   /api/v1/admin/registry/install-recipe`): Control API keeps only the entry's
-  `spec` (max 100 KB) and names the object
-  `recipe-<entry name slug>-v<version with dots as dashes>-<8 hex>`, for
-  example `recipe-acme-notes-v1-0-0-<hash>` for `@acme/notes` 1.0.0, unless the
-  request sets `recipeName`. The hash comes from the entry name and version, so
-  installing the same version twice fails (409). None of your labels or
+  `spec` (max 100 KB) and, unless the request sets `recipeName`, names the
+  object `recipe-<slug>-v<version with dots as dashes>-<hash>`. The slug is the
+  entry name with every character outside `a-z`, `0-9` and `-` turned into
+  `-` (repeats collapsed, ends trimmed, at most 40 characters); the hash is the
+  first 8 hex digits of the SHA-256 of `<entry name>:<version>`. So
+  `@acme/notes` 1.0.0 becomes `recipe-acme-notes-v1-0-0-ac24adda`, and the
+  name can be computed before installing (for example to label a pull Secret):
+
+  ```bash
+  printf '%s' '@acme/notes:1.0.0' | shasum -a 256 | cut -c1-8   # ac24adda
+  ```
+
+  Installing the same version twice fails (409). Keep entry names short: the
+  name is cut to 63 characters before its `mcp-` prefix becomes `recipe-`, so a
+  long entry name with a multi-digit version yields up to 66 characters, more
+  than the `clerum.io/recipe` label can hold. None of your labels or
   annotations are kept (so not `clerum.io/workflow-team-id` or
   `clerum.io/pvc-retention` either); Control API adds `clerum.io/managed-by:
-  control-api` and the catalog id and version as annotations.
+  control-api` and the catalog id and version as annotations. Both registry
+  routes accept `inputValues` ([recipe-fields.md](recipe-fields.md#inputs-and-templates)).
 - **Admin API** `POST /api/v1/admin/recipes` (JSON body): keeps your
   `metadata.name`, drops `metadata.namespace`, and keeps only the
   `clerum.io/workflow-team-id` label. The Control UI's recipe editor uses
@@ -94,9 +113,13 @@ kc -n sandbox-recipes get workflowrecipe "$R" -o jsonpath='{range .status.condit
   Deployments (updated, ready and available replicas).
 - `degraded` means something is not ready or a webhook Secret is missing; the
   message says which. `failed` means WRC stopped reconciling (below).
-- The Desktop only lists the plugin while it is `active`.
-- With the SDK, also read `status.pluginWorkloadSdk.state` (it can say
-  `awaiting_policy` while the phase is `active`).
+- The Desktop lists and opens the plugin only while it is `active`, so a
+  `degraded` recipe (one workload not Ready, the MCP server included) takes the
+  whole UI offline.
+- With the SDK, also read `status.pluginWorkloadSdk.state`: it can say
+  `awaiting_policy` while the phase is `active`, and the message then reads
+  `Plugin Workload SDK operator policy pending (<reason>)` instead of
+  `All workloads deployed`.
 
 ## Updating a running plugin
 
@@ -107,8 +130,10 @@ kc -n sandbox-recipes get workflowrecipe "$R" -o jsonpath='{range .status.condit
   /api/v1/admin/registry/upgrade-recipe` with `{recipeName,
   registryEntryName, registryEntryVersion}` (admin API; the Control UI has no
   button for it). It keeps the in-cluster name, so Secrets, grants and PVC data
-  carry over. Installing the newer version from the Marketplace instead
-  creates a second, independent recipe with a new name.
+  carry over, and it keeps the object's labels and annotations. It replaces
+  the whole `spec` with the new version's: edits made in the cluster are lost,
+  and `inputValues` must be sent again. Installing the newer version from the
+  Marketplace instead creates a second, independent recipe with a new name.
 - Removing a workload from the recipe does **not** delete its Deployment,
   Service or StatefulSet; delete them yourself.
 - **With `steps` and no `pluginWorkloadSdk`:** once `active`, WRC does not
@@ -152,6 +177,9 @@ workload it last saw was ready. `Policy violation: ...` failures (a
 | `egress resolution failed` | an egress host without public IPv4 records | Fix the host name |
 | `snippet workflow runtime is disabled` | snippet steps on a cluster without the snippet runtime | Operator, or avoid snippet steps |
 | `Plugin Workload SDK disabled after confirmed teardown` | SDK block on a cluster without the SDK | Operator, or remove the block |
+| `Webhook gateway disabled: ...` (`WebhookSecretMissing`) | a required webhook's Secret is missing, lacks the key, or is not owned by the recipe | Create or label the Secret, or make the webhook `optional` |
+| webhook answers `410 integration_not_configured` (`WebhookDormant`) | an `optional` webhook without its Secret | Create the Secret |
+| webhook answers `500 verifier_misconfigured` | `jwt-bearer-jwks` or `stripe-verify`, which do not work at this revision, or an unreadable Secret | [webhooks-and-oauth.md](webhooks-and-oauth.md) |
 | Desktop shows "is updating" | the recipe is not `active`, or the UI pod is not Ready | Read `status.message` and the UI pod |
 | Desktop `502 port_not_allowed` | the UI listens on a port other than 8080 | Use 8080 |
 | Plugin API calls 401 `sandbox_ui_session_invalid` | expired embed session | `clerum.requestSessionRefresh()` ([ui-embed.md](ui-embed.md)) |
@@ -165,7 +193,10 @@ at that moment, their Services, the `spec.resources` Secrets and ConfigMaps,
 the MCP registrations, the private Context and most of its NetworkPolicies. It
 keeps:
 
-- PVCs, including StatefulSet volumes (data survives; delete them yourself);
+- PVCs, including StatefulSet volumes (data survives; delete them yourself).
+  With the annotation `clerum.io/pvc-retention: delete` on the recipe
+  (`kubectl annotate`), WRC deletes its `resources[]` PVCs, but never
+  StatefulSet volumes;
 - the Secrets you created;
 - for recipes without `steps`, the user and team grants (a reinstall under the
   same name inherits them);

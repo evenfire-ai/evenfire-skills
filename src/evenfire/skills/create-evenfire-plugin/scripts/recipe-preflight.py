@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Check an Evenfire WorkflowRecipe for problems that CRD admission cannot see.
 
-The CRD schema and CEL rules are checked by `kubectl-validate` or
+The CEL rules of the CRD are checked by `kubectl-validate` or
 `kubectl apply --dry-run=server`; run one of those too. This script mirrors the
 checks that run later (the cluster admission policy, Control API at install,
 and the recipe controller on reconcile) plus pitfalls that fail silently, as of
-evenfire-ai/evenfire dev 0b26101eb.
+evenfire-ai/evenfire dev 0b26101eb. With --crd it also checks the recipe against
+the CRD's schema (unknown fields, types, enums, required fields, patterns and
+limits), which a Control API install would otherwise apply silently.
 
-Usage:   python3 recipe-preflight.py recipe.yaml [more.yaml ...]
+Usage:   python3 recipe-preflight.py [--crd workflowrecipe.yaml] recipe.yaml [more.yaml ...]
 Needs:   PyYAML (python3 -m pip install pyyaml)
 Exit:    0 no errors (warnings allowed), 1 errors found, 2 unreadable input.
 """
@@ -509,9 +511,123 @@ def check_misc(spec: dict, r: Report) -> None:
             r.info(f"spec.resources[{i}]", "workloads cannot reference this by id (it gets a generated name); use it for PVCs only")
 
 
-def check_document(doc: dict, source: str) -> Report:
+JSON_TYPES = {
+    "object": lambda v: isinstance(v, dict),
+    "array": lambda v: isinstance(v, list),
+    "string": lambda v: isinstance(v, str),
+    "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+    "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    "boolean": lambda v: isinstance(v, bool),
+}
+ROOT_FIELDS = {"apiVersion", "kind", "metadata", "spec", "status"}
+
+
+def load_crd_schema(path: str) -> dict:
+    """The openAPIV3Schema of the WorkflowRecipe CRD (charts/clerum-crds/crds/workflowrecipe.yaml)."""
+    with open(path, encoding="utf-8") as handle:
+        docs = [d for d in yaml.safe_load_all(handle) if isinstance(d, dict)]
+    for doc in docs:
+        spec = as_dict(doc.get("spec"))
+        if doc.get("kind") != "CustomResourceDefinition" or as_dict(spec.get("names")).get("kind") != "WorkflowRecipe":
+            continue
+        for version in as_list(spec.get("versions")):
+            schema = as_dict(as_dict(as_dict(version).get("schema")).get("openAPIV3Schema"))
+            if as_dict(version).get("name") == "v1alpha1" and schema:
+                return schema
+    raise ValueError("no WorkflowRecipe v1alpha1 schema in this file")
+
+
+def type_name(value: Any) -> str:
+    if isinstance(value, bool):
+        return "boolean"
+    for name in ("object", "array", "string", "integer", "number"):
+        if JSON_TYPES[name](value):
+            return name
+    return "null" if value is None else type(value).__name__
+
+
+def check_schema(value: Any, schema: dict, where: str, r: Report) -> None:
+    """Structural validation like the API server's, minus CEL rules and formats."""
+    if value is None:
+        if not schema.get("nullable"):
+            r.error(where, "null is not allowed")
+        return
+    expected = schema.get("type")
+    if expected in JSON_TYPES and not JSON_TYPES[expected](value):
+        r.error(where, f"must be {expected}, got {type_name(value)}")
+        return
+    if "enum" in schema and value not in schema["enum"]:
+        r.error(where, f"{value!r} is not one of: {', '.join(map(str, schema['enum']))}")
+    if isinstance(value, str):
+        if "maxLength" in schema and len(value) > schema["maxLength"]:
+            r.error(where, f"longer than {schema['maxLength']} characters")
+        if "minLength" in schema and len(value) < schema["minLength"]:
+            r.error(where, f"shorter than {schema['minLength']} characters")
+        pattern = schema.get("pattern")
+        if pattern:
+            try:
+                if not re.search(pattern, value):
+                    r.error(where, f"{value!r} does not match {pattern}")
+            except re.error:
+                pass
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        if "minimum" in schema and value < schema["minimum"]:
+            r.error(where, f"below the minimum {schema['minimum']}")
+        if "maximum" in schema and value > schema["maximum"]:
+            r.error(where, f"above the maximum {schema['maximum']}")
+    elif isinstance(value, list):
+        if "maxItems" in schema and len(value) > schema["maxItems"]:
+            r.error(where, f"more than {schema['maxItems']} items")
+        if "minItems" in schema and len(value) < schema["minItems"]:
+            r.error(where, f"fewer than {schema['minItems']} items")
+        if schema.get("x-kubernetes-list-type") == "set" and len(set(map(repr, value))) != len(value):
+            r.error(where, "duplicate items in a set")
+        items = schema.get("items")
+        if isinstance(items, dict):
+            for i, item in enumerate(value):
+                check_schema(item, items, f"{where}[{i}]", r)
+    elif isinstance(value, dict):
+        props = as_dict(schema.get("properties"))
+        additional = schema.get("additionalProperties")
+        open_object = schema.get("x-kubernetes-preserve-unknown-fields") is True or additional is True
+        for key, item in value.items():
+            if key in props:
+                check_schema(item, props[key], f"{where}.{key}", r)
+            elif isinstance(additional, dict):
+                check_schema(item, additional, f"{where}.{key}", r)
+            elif not open_object:
+                r.error(f"{where}.{key}", "unknown field (kubectl rejects it; a Control API install drops it silently)")
+        for key in as_list(schema.get("required")):
+            if key not in value and "default" not in as_dict(props.get(key)):
+                r.error(where, f"missing required field {key!r}")
+        if "maxProperties" in schema and len(value) > schema["maxProperties"]:
+            r.error(where, f"more than {schema['maxProperties']} fields")
+        choices = as_list(schema.get("oneOf"))
+        if choices and all(set(as_dict(c)) == {"required"} for c in choices):
+            matched = sum(all(k in value for k in as_list(as_dict(c).get("required"))) for c in choices)
+            if matched != 1:
+                options = " | ".join("+".join(as_list(as_dict(c).get("required"))) for c in choices)
+                r.error(where, f"set exactly one of: {options}")
+
+
+def check_against_crd(doc: dict, schema: dict, r: Report) -> None:
+    for key in doc:
+        if key not in ROOT_FIELDS:
+            r.error(key, "unknown top-level field")
+    if doc.get("apiVersion") != "clerum.io/v1alpha1":
+        r.error("apiVersion", "must be clerum.io/v1alpha1")
+    spec_schema = as_dict(as_dict(schema.get("properties")).get("spec"))
+    if "spec" not in doc:
+        r.error("spec", "missing")
+    elif spec_schema:
+        check_schema(doc["spec"], spec_schema, "spec", r)
+
+
+def check_document(doc: dict, source: str, crd_schema: dict | None = None) -> Report:
     r = Report(source)
     spec = as_dict(doc.get("spec"))
+    if crd_schema:
+        check_against_crd(doc, crd_schema, r)
     check_metadata(doc, spec, r)
     check_workflow_fields(doc, spec, r)
     check_workloads(spec, r)
@@ -524,11 +640,25 @@ def check_document(doc: dict, source: str) -> Report:
 
 
 def main(argv: list[str]) -> int:
-    if not argv:
+    crd_schema: dict | None = None
+    paths: list[str] = []
+    args = list(argv)
+    while args:
+        arg = args.pop(0)
+        if arg != "--crd" and not arg.startswith("--crd="):
+            paths.append(arg)
+            continue
+        crd_path = arg[len("--crd="):] if arg.startswith("--crd=") else (args.pop(0) if args else "")
+        try:
+            crd_schema = load_crd_schema(crd_path)
+        except (OSError, yaml.YAMLError, ValueError) as exc:
+            sys.stderr.write(f"{crd_path or '--crd'}: cannot load the CRD: {exc}\n")
+            return 2
+    if not paths:
         sys.stderr.write(__doc__ or "")
         return 2
     total_errors = 0
-    for path in argv:
+    for path in paths:
         try:
             with open(path, encoding="utf-8") as handle:
                 docs = [d for d in yaml.safe_load_all(handle) if isinstance(d, dict)]
@@ -541,7 +671,7 @@ def main(argv: list[str]) -> int:
             return 2
         for doc in recipes:
             name = as_dict(doc.get("metadata")).get("name", "?")
-            report = check_document(doc, path)
+            report = check_document(doc, path, crd_schema)
             print(f"{path} ({name}): {report.errors} error(s)")
             for level, where, message in report.items:
                 print(f"  {level:<5} {where}: {message}")

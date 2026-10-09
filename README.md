@@ -88,9 +88,10 @@ Each is runnable on its own and has been exercised against a live system:
 - `run-debug-evenfire/scripts/evenfire-doctor.sh <context> [recipe-base-name]` —
   a read-only cluster health sweep that never mutates anything.
 
-- `create-evenfire-plugin/scripts/recipe-preflight.py <recipe.yaml>` — checks a
-  recipe for the rules the CRD cannot enforce (the cluster admission policy,
-  Control API at install, and the recipe controller), plus silent pitfalls.
+- `create-evenfire-plugin/scripts/recipe-preflight.py [--crd workflowrecipe.yaml] <recipe.yaml>`:
+  checks a recipe against the CRD schema (with `--crd`), then for the rules the
+  CRD cannot enforce (the cluster admission policy, Control API at install, and
+  the recipe controller), plus silent pitfalls.
 
 The shell scripts need `bash`, `curl`, and `jq`; the doctor also needs `kubectl`.
 The preflight needs Python 3 with PyYAML.

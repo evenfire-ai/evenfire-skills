@@ -33,27 +33,75 @@ your own `cronjob` workload.
 | `verification` | see below | Required |
 | `replay` | `{timestampHeader, toleranceSec 10-3600 (default 300)}` | Required with `hmac-sha256-timestamp-body` (W8) |
 
-`verification.scheme`:
+Everything below sits under `verification`, next to `scheme`:
 
-- `hmac-sha256-body`, `hmac-sha256-timestamp-body`: `secretRef {name, key}`
-  plus `signatureHeader`; optional `signaturePrefix` (e.g. `sha256=`) and
-  `signatureEncoding` `hex` (default) or `base64`.
+- `hmac-sha256-body`: `secretRef {name, key}` and `signatureHeader`. The
+  gateway computes HMAC-SHA256 of the raw body with the Secret value and
+  compares it with the header after removing the optional `signaturePrefix`
+  (e.g. `sha256=`); `signatureEncoding` is `hex` (default) or `base64`. This is
+  GitHub's `X-Hub-Signature-256: sha256=<hex>` form.
+- `hmac-sha256-timestamp-body`: the same fields, plus a top-level `replay`
+  block. The signed string is exactly `<timestamp>.<raw body>`, where the
+  timestamp is the value of `replay.timestampHeader` in whole Unix seconds and
+  must be within `replay.toleranceSec` of the gateway clock. Check that your
+  provider signs that exact string: Slack, for example, signs
+  `v0:<timestamp>:<body>`, which does not verify here.
 - `static-bearer`: `secretRef`; optional `tokenHeader` (default
   `Authorization`) and `tokenPrefix` (default `Bearer `; an explicit empty
   string means the whole header value is the token).
 - `jwt-bearer-jwks`: `jwksUrl` (https, DNS host), `issuer`, `audience`; no
-  `secretRef` (W7, W9, W12).
-- `setupHandshake.strategy`: `meta-hub-challenge` (needs its own `secretRef`
-  and `GET`, W14), `slack-url-verification`, `stripe-verify`. Only that exact
-  handshake request skips signature verification.
+  `secretRef` (W7, W9, W12). It passes admission, but at this revision nothing
+  loads the JWKS into the gateway, so a request with a well-formed token gets
+  `500 verifier_misconfigured`. Use another scheme.
+- `setupHandshake {strategy, secretRef?}`: `meta-hub-challenge` (needs its own
+  `secretRef` and `GET`, W14) answers the subscription `GET` before any
+  signature check; `slack-url-verification` answers a `url_verification`
+  challenge after the signature verified. `stripe-verify` passes admission
+  but is not implemented: every request to that webhook gets `500
+  verifier_misconfigured`.
+
+The Secret value is used as stored, minus one trailing newline. Two webhooks:
+
+```yaml
+spec:
+  webhooks:
+    - id: form-intake                # last segment of the public URL
+      workloadRef: api               # a deployment without transport
+      path: /webhooks/form-intake    # the path the handler receives
+      maxBodyBytes: 65536
+      optional: true                 # 410 until the Secret exists, instead of degrading the recipe
+      verification:
+        scheme: static-bearer        # Authorization: Bearer <token>
+        secretRef: { name: notes-webhooks, key: form-token }
+    - id: github
+      workloadRef: api
+      path: /webhooks/github
+      verification:
+        scheme: hmac-sha256-body
+        secretRef: { name: notes-webhooks, key: github-secret }
+        signatureHeader: X-Hub-Signature-256
+        signaturePrefix: 'sha256='
+```
 
 ### Secrets for webhooks
 
 `secretRef` Secrets live in `sandbox-recipes` and need the same ownership label
 as any recipe Secret (`clerum.io/owner-recipe=<recipe>` or
-`clerum.io/shared=true`). A missing or unowned Secret on a required webhook
-deletes the gateway and marks the recipe `degraded` (conditions
-`WebhookSecretMissing` / `WebhookHandlerInvalid`); it never fails the recipe.
+`clerum.io/shared=true`). A webhook's Secret counts as missing when it does not
+exist, lacks the key, or is not owned by the recipe.
+
+- With `optional: true` the webhook answers 410 (condition `WebhookDormant`)
+  and the rest of the recipe keeps working; creating the Secret activates it.
+- On a required webhook (the default), one missing Secret deletes the whole
+  webhook gateway, so every webhook of the recipe stops, and the recipe goes
+  `degraded` (condition `WebhookSecretMissing`, message `Webhook gateway
+  disabled: ...`). A `degraded` recipe is not served in the Desktop, so the
+  plugin's UI goes offline too. It never fails the recipe. A `workloadRef`
+  that is not a deployment without `transport` does the same, with
+  `WebhookHandlerInvalid`.
+
+The gateway reads the Secret file on every request, so a rotated value takes
+effect once Kubernetes refreshes the mounted Secret, without a restart.
 
 ### The public URL
 
@@ -75,6 +123,22 @@ https://<webhook host>/api/v1/webhook/sandbox-recipes/<recipe name>/<webhook id>
   (`<namespace>/<recipe>`) and `x-clerum-webhook-verified-at`, so a caller on
   the internet cannot spoof them. Verification already happened; a custom
   `tokenHeader` is not on the strip list, so do not log request headers.
+- Every other header is forwarded, `Content-Type` included. The handler's
+  status, headers and body go back to the caller unchanged. The handler has
+  30 s to answer before the gateway replies `504 {"error":"gateway_timeout"}`
+  (`502 upstream_error` when it cannot be reached).
+
+What the gateway answers before your handler runs:
+
+| Status | `error` | When |
+|---|---|---|
+| 401 | `invalid_signature` | Missing or wrong signature or token |
+| 405 | `method_not_allowed` | Method not in `methods` |
+| 408 | `timestamp_skew`, `request_timeout` | Timestamp outside `toleranceSec`; the body stalled for 10 s |
+| 410 | `integration_not_configured` | An `optional` webhook is dormant (header `X-Clerum-Webhook-State: dormant`) |
+| 413 | `body_too_large` | Over `maxBodyBytes` |
+| 500 | `verifier_misconfigured` | The Secret cannot be read, or a scheme or strategy that does not work at this revision (above) |
+| 503 | `gateway_busy` | 256 requests already in flight in the recipe's gateway |
 
 For browser widgets that call a webhook from a customer site, list every exact
 origin in `cors.allowedOrigins`, and treat any bearer token embedded in a page
