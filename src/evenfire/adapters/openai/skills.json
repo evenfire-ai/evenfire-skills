@@ -1,0 +1,22 @@
+{
+  "create-evenfire-mcp-server": {
+    "display_name": "Create Evenfire MCP Server",
+    "short_description": "Build or wrap an MCP server/connector for Evenfire",
+    "default_prompt": "Use $create-evenfire-mcp-server to build or wrap this MCP server for Evenfire."
+  },
+  "create-evenfire-plugin": {
+    "display_name": "Create Evenfire Plugin",
+    "short_description": "Build an Evenfire WorkflowRecipe plugin end to end",
+    "default_prompt": "Use $create-evenfire-plugin to design and wire this Evenfire plugin."
+  },
+  "publish-evenfire-plugin": {
+    "display_name": "Publish Evenfire Plugin",
+    "short_description": "Publish a recipe or connector to the Evenfire org registry",
+    "default_prompt": "Use $publish-evenfire-plugin to publish, version, and install this entry."
+  },
+  "run-debug-evenfire": {
+    "display_name": "Run and Debug Evenfire",
+    "short_description": "Run the Evenfire stack and debug a recipe, MCP, UI, or webhook",
+    "default_prompt": "Use $run-debug-evenfire to bring up or debug this Evenfire stack."
+  }
+}

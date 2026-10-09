@@ -1,0 +1,43 @@
+# Rendered at container start by the nginx image entrypoint (envsubst). Only
+# variables that exist in the environment are replaced: API_HOST, API_PORT and
+# NGINX_LOCAL_RESOLVERS. $host, $uri, $http_* and $api_upstream stay for nginx.
+server {
+    listen 8080;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # ^~ keeps API paths away from the regex location below, which would
+    # otherwise catch any API path that contains /assets/.
+    location ^~ /api/ {
+        # Resolve the backend on each request. A literal host makes nginx exit at
+        # start ("host not found in upstream") whenever the backend Service does
+        # not resolve yet, and the UI pod crash-loops. With a variable, such a
+        # request answers 502 until the backend is up.
+        resolver ${NGINX_LOCAL_RESOLVERS} valid=10s ipv6=off;
+        set $api_upstream http://${API_HOST}:${API_PORT};
+        # No URI after the variable: the request path is forwarded unchanged.
+        proxy_pass $api_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Clerum-User $http_x_clerum_user;
+        # rpc-proxy never forwards one; clearing it keeps Authorization reserved
+        # for in-cluster callers of the backend, such as your MCP server.
+        proxy_set_header Authorization "";
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # Server-sent events: keep the backend's heartbeat interval below this.
+        proxy_read_timeout 60s;
+    }
+
+    # Built assets live at the root, but a page opened at a nested route asks
+    # for <route>/assets/... (relative URLs). Map those back to the real file
+    # so a refresh on a nested route does not get index.html for its scripts.
+    location ~ ^/.+/(assets/.+)$ {
+        try_files /$1 =404;
+    }
+
+    # Single-page app: every other unknown path serves index.html.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

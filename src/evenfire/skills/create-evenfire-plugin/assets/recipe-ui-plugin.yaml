@@ -1,0 +1,158 @@
+# A complete UI plugin: web UI in the Evenfire Desktop app, a backend that holds
+# the credentials, a Postgres database, and an MCP server so chat agents can use
+# the same data. No `steps`: the recipe stays a pure workloads recipe, so
+# webhooks are possible and image changes roll out when you edit the recipe.
+#
+# Replace registry.example.com/acme/notes-* with your images (immutable tags),
+# and `standard` with a StorageClass your cluster has (`kubectl get
+# storageclass`; the field is required, and an empty string turns off dynamic
+# provisioning instead of selecting the default class).
+apiVersion: clerum.io/v1alpha1
+kind: WorkflowRecipe
+metadata:
+  name: notes # lowercase RFC 1123 label, max 63; the recipe lives in sandbox-recipes
+spec:
+  description: |
+    Notes: shared notes for your team, in the Evenfire Desktop app and for chat
+    agents through the "notes" MCP server.
+
+    Before use, create these Secrets (Control UI: open the plugin, Secrets tab,
+    Add; it writes the ownership label). The labels must name the installed
+    recipe, so install first.
+      notes-secrets      in sandbox-recipes
+        pg-password      Postgres password (db and api)       required
+        mcp-api-token    shared with the MCP server            optional
+      notes-mcp-secrets  in mcp-server
+        mcp-api-token    the same value as above               optional
+
+    Then grant users or teams access (Members or Teams tab). To let a chat
+    agent use the MCP server, an operator adds it to the agent's Context.
+
+  security:
+    isolationLevel: minimal
+
+  workloads:
+    - id: db
+      type: statefulset
+      image: postgres:16-alpine # a major-version tag; pin a patch tag or digest for repeatable installs
+      port: 5432
+      env:
+        - { name: POSTGRES_USER, value: notes }
+        - { name: POSTGRES_DB, value: notes }
+        - { name: PGDATA, value: /var/lib/postgresql/data/pgdata } # not the mount root
+      envSecret:
+        name: notes-secrets
+        keys:
+          - { secretKey: pg-password, envVar: POSTGRES_PASSWORD }
+      volumeMounts:
+        - { name: pgdata, mountPath: /var/lib/postgresql/data }
+      volumeClaimTemplates:
+        - { name: pgdata, storageClass: standard, accessMode: ReadWriteOnce, size: 1Gi }
+      security:
+        runAsUser: 70 # the postgres:16-alpine user
+        runAsGroup: 70
+        fsGroup: 70
+        addCapabilities: [CHOWN, FOWNER, DAC_OVERRIDE] # initdb needs them
+      healthCheck:
+        type: exec
+        command: ['pg_isready', '-U', 'notes', '-d', 'notes']
+        initialDelaySeconds: 10
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 6
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits: { cpu: '1', memory: 768Mi }
+
+    - id: api
+      type: deployment
+      image: registry.example.com/acme/notes-api:1.0.0
+      port: 8080
+      dependsOn: [db]
+      env:
+        # Templates resolve to the real Service; WRC also opens api -> db from them.
+        - { name: PG_HOST, value: '{{db:host}}' }
+        - { name: PG_PORT, value: '{{db:port}}' }
+        - { name: PG_USER, value: notes }
+        - { name: PG_DATABASE, value: notes }
+      envSecret:
+        name: notes-secrets
+        keys:
+          - { secretKey: pg-password, envVar: PG_PASSWORD }
+          - { secretKey: mcp-api-token, envVar: MCP_SERVICE_TOKEN, optional: true }
+      # Every third-party host the backend calls, one exact-host entry each:
+      # egressBindings:
+      #   - { dns: api.github.com, port: 443 }
+      security:
+        runAsUser: 1000
+      healthCheck:
+        type: http
+        path: /healthz
+        port: 8080
+        initialDelaySeconds: 15 # room for migrations; there is no startupProbe
+        periodSeconds: 10
+        timeoutSeconds: 3
+        failureThreshold: 6
+      resources:
+        requests: { cpu: 100m, memory: 192Mi }
+        limits: { cpu: '1', memory: 512Mi }
+
+    - id: mcp
+      type: deployment
+      image: registry.example.com/acme/notes-mcp:1.0.0
+      port: 3000
+      transport: { type: streamableHttp, path: /mcp } # runs in mcp-server
+      env:
+        - { name: API_BASE, value: 'http://{{api:host}}:{{api:port}}' }
+      envSecret:
+        name: notes-mcp-secrets # read from mcp-server, not sandbox-recipes
+        keys:
+          - { secretKey: mcp-api-token, envVar: MCP_SERVICE_TOKEN, optional: true }
+      security:
+        runAsUser: 1000
+      healthCheck:
+        type: http
+        path: /healthz
+        port: 3000
+        periodSeconds: 15
+        timeoutSeconds: 3
+        failureThreshold: 3
+      resources:
+        requests: { cpu: 25m, memory: 64Mi }
+        limits: { cpu: 250m, memory: 192Mi }
+
+    - id: ui
+      type: deployment
+      replicas: 1
+      image: registry.example.com/acme/notes-ui:1.0.0
+      port: 8080 # must equal spec.ui.port, and rpc-proxy allows 8080
+      env:
+        - { name: API_HOST, value: '{{api:host}}' }
+        - { name: API_PORT, value: '{{api:port}}' }
+      security:
+        runAsUser: 101 # nginx-unprivileged
+      healthCheck:
+        type: http
+        path: /
+        port: 8080
+        initialDelaySeconds: 3
+        periodSeconds: 15
+        timeoutSeconds: 3
+        failureThreshold: 3
+      resources:
+        requests: { cpu: 25m, memory: 32Mi }
+        limits: { cpu: 250m, memory: 128Mi }
+
+  ui:
+    workloadRef: ui
+    port: 8080
+    title: Notes
+    icon: 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA0OCA0OCI+PHJlY3QgeD0iNiIgeT0iNCIgd2lkdGg9IjM2IiBoZWlnaHQ9IjQwIiByeD0iNiIgZmlsbD0iIzFGNkM5RiIvPjxwYXRoIGQ9Ik0xNCAxNmgyME0xNCAyNGgyME0xNCAzMmgxMiIgc3Ryb2tlPSIjZmZmIiBzdHJva2Utd2lkdGg9IjMiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjwvc3ZnPg=='
+    defaultPath: /
+    egress:
+      internal:
+        - { workloadRef: api, port: 8080 } # the UI's reverse proxy -> api
+
+  # The MCP server (mcp-server namespace) reaches its backend (sandbox-recipes).
+  bindings:
+    - { from: mcp, to: api, port: 8080, protocol: TCP }

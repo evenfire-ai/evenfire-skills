@@ -13,10 +13,9 @@ description: >-
 
 # Publishing to the Evenfire org registry
 
-> **Verified against Evenfire `dev` at commit `21d9a7d5d` (2026-08-11).**
-> `git describe`: `v0.3.0-915-g21d9a7d5d`. CRD API `clerum.io/v1alpha1`,
-> `clerum-crds` chart `0.7.0`. Field names, enums, endpoints, and commands below
-> match that revision. See [VERSIONS.md](../VERSIONS.md).
+> **Verified against Evenfire `dev` at commit `f9e8d0487`.**
+> CRD API `clerum.io/v1alpha1`, `clerum-crds` chart `0.8.0`. Field names, enums,
+> endpoints, and commands below match that revision.
 
 Publishing has two halves that must both be true at install time:
 
@@ -40,10 +39,10 @@ Author recipes with `create-evenfire-plugin` and MCP servers with
 | control-api `POST /api/v1/admin/registry/entries` | admin control-ui session | an operator in the browser or an admin script | server auto-applies the `@<org>/` scope |
 | raw `POST https://registry.evenfire.ai/api/v1/entries` | `Authorization: Bearer efrk_...` | CI, scripts, an agent | YOU must supply `@<org>/<name>` |
 
-Both forward the same JSON body. The current Control UI publish form is
-connector-only (it pins `entryType: mcp-server`); recipe/plugin publishing goes
-through the raw `efrk_` API path, not that form. Use the raw API for anything
-scripted.
+Both forward the same JSON body. The Control UI publish form defaults to
+`entryType: mcp-server` but supports both — a segmented control switches it to
+`recipe` (open it with `?type=recipe`), which publishes the recipe YAML. Use the
+raw `efrk_` API for anything scripted.
 
 ## 2. Mint an efrk_ org key (one time)
 
@@ -122,6 +121,9 @@ recipe document as a YAML/JSON string, <= 100 KB) for a recipe entry, or an
   org's own clusters/members and hides it from the default catalog. To read it
   back over the API you must pass `?visibility=all`.
 - `origin`: `human-authored | agent-generated | community`.
+- `category`: a value from the registry's category catalog (the Control UI lists
+  them via `GET /api/v1/admin/registry/categories`), for example `productivity`,
+  `data`, or `utility` — not free-form.
 - `contentCreatorTag` / `configCreatorTag`: `community` (or `1st-party` for a
   curator-published first-party entry).
 
@@ -168,15 +170,16 @@ Install through the Control UI Marketplace (recommended) or the control-api admi
 endpoints:
 
 - MCP-server connector: `POST /api/v1/admin/registry/install`. control-api
-  auto-attaches `spec.imagePullSecrets: [{name: evenfire-registry-pull}]` for a
-  local-mode entry whose image is on the org registry, and ensures that Secret
-  exists.
+  attaches `spec.imagePullSecrets: [{name: evenfire-registry-pull}]` (by name) for
+  a local-mode entry whose image is on the org registry. The
+  `evenfire-registry-pull` Secret itself is provisioned by the platform, not
+  created by the install call.
 - Recipe: `POST /api/v1/admin/registry/install-recipe`. This does NOT write
-  `imagePullSecrets` into the recipe spec. Platform-hosted workload images get
-  the `evenfire-registry-pull` Secret ensured by control-api and injected by WRC;
-  a third-party PRIVATE image in a recipe gets nothing, so either use publicly
-  pullable images or have the operator pre-create a recipe-owned Secret and set
-  `workloads[].imagePullSecrets`.
+  `imagePullSecrets` into the recipe spec, and nothing auto-attaches one to recipe
+  workloads (WRC only propagates an `imagePullSecrets` already present in the
+  recipe). A private image in a recipe therefore gets no pull secret, so either use
+  publicly pullable images or have the operator pre-create a recipe-owned Secret
+  and set `workloads[].imagePullSecrets`.
 - Direct recipe create (CI, bypasses the marketplace): `POST /api/v1/admin/recipes`.
 
 Verify a private entry published (it is hidden from the default catalog):
@@ -215,8 +218,9 @@ unchanged tag with new bits; installed clusters will not re-pull.
   Use `DELETE .../versions/<version>`.
 - Bare `name`, or a `@<org>/<name>` whose `<name>` != `metadata.name` -> `400`.
 - Image repo path != scoped entry name -> `422` at publish and install.
-- Expecting the Control UI publish form to publish a recipe -> it is
-  connector-only now; recipes go through the raw `efrk_` POST.
+- Expecting the Control UI publish form to only do connectors -> it defaults to
+  `mcp-server` but also publishes recipes (switch the segmented control, or open
+  it with `?type=recipe`).
 - Expecting a `private` entry in the default catalog -> query with
   `?visibility=all`.
 - Recipe with a private third-party image expecting an auto pull secret -> only
